@@ -1,0 +1,13 @@
+[project]
+name = "wildchat-1mm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.4.0",
+    "numpy>=2.3.3",
+    "polars>=1.31.0",
+    "pyarrow>=21.0.0",
+    "pytz>=2025.2",
+]
