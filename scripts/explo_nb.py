@@ -157,23 +157,19 @@ def _(df, new_fields, pl):
             "state_nested",
             "country_nested",
             "toxic",
+            "language_nested",
         )
         .unnest("header")
-        .rename({"language_nested": "language_message"})
     )
     return (df_mess_lvl,)
 
 
 @app.cell
-def _(pl):
+def _(df_mess_lvl, pl):
     create_conversation_id = (
         pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
     ).alias("conversation_id")
-    return (create_conversation_id,)
 
-
-@app.cell
-def _(create_conversation_id, df_mess_lvl, pl):
     df_conv_lvl = (
         df_mess_lvl.with_columns(create_conversation_id)
         .group_by("conversation_id")
@@ -203,7 +199,7 @@ def _(create_conversation_id, df_mess_lvl, pl):
             ]
         )
     )
-    return
+    return (df_conv_lvl,)
 
 
 @app.cell(hide_code=True)
@@ -211,6 +207,45 @@ def _(mo):
     mo.md(r"""
     ---
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(df, df_conv_lvl, df_mess_lvl, mo):
+    mo.md(rf"""
+    Takeway: 
+
+    3 levels in the data:
+    - User (top level, raw data)
+    - Conversation (1 user can have [1:n] conversations)
+    - Message
+
+    Manipulation:   
+    User level *{df.collect().height} rows* ➡️ Message level *{df_mess_lvl.collect().height} rows* ➡️ Conversation level *{df_conv_lvl.collect().height} rows*
+
+    Most of the users have a single conversation. There is only 71 more conversations than users
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Exploration
+
+    Conversations are a set of messages between the user and the assistant (AI).
+    What are baasic elements about the conversations and messages ?
+
+    - Number of turns (1 turn is a set of 1 message from the user and 1 message (the response) from the assistant)
+    - Number of message per conversations
+    - user's messages to assistant's messages ratio
+    - Lenght of messages/ conversation in tokens
+    """)
+    return
+
+
+@app.cell
+def _():
     return
 
 
@@ -269,28 +304,6 @@ def _(dff):
     return
 
 
-@app.cell
-def _(dff, new_fields, pl):
-    dff.with_columns(
-        ["conversation_hash", "conversation"]
-    ).explode(  # explode the list of struct (-1 layer)
-        "conversation"
-    ).with_columns(
-        pl.col("conversation").struct.rename_fields(
-            new_fields
-        )  # var name conflict between vars and nested vars
-    ).unnest(  # unnest the struct (now flat)
-        "conversation"
-    ).drop(
-        "hashed_ip_nested",
-        "header_nested",
-        "state_nested",
-        "country_nested",
-        "toxic",
-    ).unnest("header").rename({"language_nested": "language_message"})
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -331,16 +344,8 @@ def _(mo):
 
 @app.cell
 def _(df_mess_lvl):
-    dfff = df_mess_lvl.head(100).collect()
-    return
-
-
-@app.cell
-def _(pl):
-    create_conversation_id = (
-        pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
-    ).alias("conversation_id")
-    return (create_conversation_id,)
+    dft = df_mess_lvl.head(100).collect()
+    return (dft,)
 
 
 @app.cell
@@ -370,9 +375,13 @@ def _(mo):
 
 
 @app.cell
-def _(create_conversation_id, df_mess_lvl, pl):
-    df_conv_lvl = (
-        df_mess_lvl.with_columns(create_conversation_id)
+def _(df_mess_lvl, pl):
+    _create_conversation_id = (
+        pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
+    ).alias("conversation_id")
+
+    _df_conv_lvl = (
+        df_mess_lvl.with_columns(_create_conversation_id)
         .group_by("conversation_id")
         .agg(
             [
@@ -403,6 +412,42 @@ def _(create_conversation_id, df_mess_lvl, pl):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ---
+    """)
+    return
+
+
+@app.cell
+def _():
+    import altair as alt
+    return (alt,)
+
+
+@app.cell
+def _(dft):
+    dft
+    return
+
+
+@app.cell
+def _(alt, dft, mo):
+    chart = (
+        alt.Chart(dft)
+        .mark_bar()
+        .encode(
+            x=alt.X("turn:N", labelAngle=0),
+            y="count()",
+        )
+        .properties(title="Count of turns")
+    )
+
+    mo.ui.altair_chart(chart)
+    return
+
+
 @app.cell(column=2, hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -412,68 +457,157 @@ def _(mo):
 
 
 @app.cell
-def _(create_conversation_id, df_mess_lvl, duckdb, pl):
+def _(df_mess_lvl, duckdb, pl):
     import time
 
-    test_df = df_mess_lvl.clone()
+    # ============================================================================
+    # PIPELINE FUNCTIONS
+    # ============================================================================
 
 
-    # Polars lazy approach
-    def polars_approach(wip):
-        return (
+    def full_polars_pipeline():
+        """Complete Polars pipeline: import -> transform -> aggregate -> collect once"""
+
+        # Step 1: Import data
+        df = (
+            duckdb.query(
+                """
+                SELECT * EXCLUDE (toxic, timestamp, redacted, openai_moderation, detoxify_moderation)
+                FROM 'data/raw/train-00000-of-00014.parquet' 
+                WHERE language = 'English'
+                """
+            )
+            .pl(lazy=True)
+            .rename({"language": "lang_conv"})
+        )
+
+        # Step 2: Unnesting and transformation
+        conflicting_cols = ["language", "country", "state", "hashed_ip", "header"]
+        struct_fields = (
+            df.select("conversation")
+            .explode("conversation")
+            .head(0)
+            .collect()
+            .to_series()
+            .struct.fields
+        )
+        new_fields = [
+            f"{field}_nested" if field in conflicting_cols else field
+            for field in struct_fields
+        ]
+
+        df_mess_lvl = (
+            df.with_columns(["conversation_hash", "conversation"])
+            .explode("conversation")
+            .with_columns(pl.col("conversation").struct.rename_fields(new_fields))
+            .unnest("conversation")
+            .drop(
+                "hashed_ip_nested",
+                "header_nested",
+                "state_nested",
+                "country_nested",
+                "toxic",
+                "language_nested",
+            )
+            .unnest("header")
+        )
+
+        # Step 3: Aggregation
+        create_conversation_id = (
+            pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
+        ).alias("conversation_id")
+
+        df_conv_lvl = (
             df_mess_lvl.with_columns(create_conversation_id)
             .group_by("conversation_id")
             .agg(
                 [
-                    # First user message content
                     pl.col("content")
                     .filter(pl.col("role") == "user")
                     .first()
                     .alias("first_user_content"),
-                    # All user messages concatenated
                     pl.col("content")
                     .filter(pl.col("role") == "user")
                     .str.join(delimiter="\n\n")
                     .alias("all_user_content"),
-                    # All assistant messages concatenated
                     pl.col("content")
                     .filter(pl.col("role") == "assistant")
                     .str.join(delimiter="\n\n")
                     .alias("all_assistant_content"),
-                    # All messages concatenated (user and assistant)
                     pl.col("content")
                     .str.join(delimiter="\n\n")
                     .alias("all_content"),
-                    # Keep other columns (take first value)
                     pl.exclude(
                         ["content", "turn_identifier", "role", "timestamp"]
                     ).first(),
                 ]
             )
-            .collect()
+            .collect()  # Single collect at the end
         )
 
+        return df_conv_lvl
 
-    def duckdb_approach(test_df_collected):
-        return duckdb.sql("""
+
+    def full_duckdb_pipeline():
+        """Complete DuckDB pipeline: import -> transform (polars) -> aggregate (duckdb)"""
+
+        # Step 1: Import data
+        df = (
+            duckdb.query(
+                """
+                SELECT * EXCLUDE (toxic, timestamp, redacted, openai_moderation, detoxify_moderation)
+                FROM 'data/raw/train-00000-of-00014.parquet' 
+                WHERE language = 'English'
+                """
+            )
+            .pl(lazy=True)
+            .rename({"language": "lang_conv"})
+        )
+
+        # Step 2: Unnesting and transformation (using Polars)
+        conflicting_cols = ["language", "country", "state", "hashed_ip", "header"]
+        struct_fields = (
+            df.select("conversation")
+            .explode("conversation")
+            .head(0)
+            .collect()
+            .to_series()
+            .struct.fields
+        )
+        new_fields = [
+            f"{field}_nested" if field in conflicting_cols else field
+            for field in struct_fields
+        ]
+
+        df_mess_lvl = (
+            df.with_columns(["conversation_hash", "conversation"])
+            .explode("conversation")
+            .with_columns(pl.col("conversation").struct.rename_fields(new_fields))
+            .unnest("conversation")
+            .drop(
+                "hashed_ip_nested",
+                "header_nested",
+                "state_nested",
+                "country_nested",
+                "toxic",
+                "language_nested",
+            )
+            .unnest("header")
+            .collect()  # FIRST collect for DuckDB to work with
+        )
+
+        # Step 3: Aggregation using DuckDB
+        df_final = duckdb.sql("""
             SELECT 
                 conversation_hash || '_' || hashed_ip as conversation_id,        
-                -- First user message content
                 (ARRAY_AGG(content ORDER BY turn_identifier) 
                  FILTER (WHERE role = 'user'))[1] as first_user_content,
-
-                -- All user messages concatenated
                 STRING_AGG(content, '\n\n' ORDER BY turn_identifier) 
                  FILTER (WHERE role = 'user') as all_user_content,
-
-                -- All assistant messages concatenated
                 STRING_AGG(content, '\n\n' ORDER BY turn_identifier) 
                  FILTER (WHERE role = 'assistant') as all_assistant_content,
-
-                -- All messages concatenated
                 STRING_AGG(content, '\n\n' ORDER BY turn_identifier) as all_content,
-
-                -- Keep other columns (first value)
+                FIRST(conversation_hash) as conversation_hash,
                 FIRST(hashed_ip) as hashed_ip,
                 FIRST(lang_conv) as lang_conv,
                 FIRST(model) as model,
@@ -483,38 +617,79 @@ def _(create_conversation_id, df_mess_lvl, duckdb, pl):
                 FIRST(country) as country,
                 FIRST('accept-language') as 'accept-language',
                 FIRST('user-agent') as 'user-agent',
-
-            FROM test_df_collected
+            FROM df_mess_lvl
             GROUP BY conversation_id
-        """).pl()
+        """).pl()  # SECOND collect (implicit in .pl())
+
+        return df_final
 
 
-    # Benchmark
-    test_df_collected = test_df.collect()  # Collect once for fair comparison
+    # ============================================================================
+    # BENCHMARK EXECUTION
+    # ============================================================================
 
-    # Warm-up runs (important!)
-    _ = polars_approach(test_df.clone())
-    _ = duckdb_approach(test_df_collected)
+    print("=" * 70)
+    print("FULL PIPELINE BENCHMARK: DuckDB vs Polars")
+    print("=" * 70)
 
-    # Actual timing
+    # Warm-up runs (crucial for JIT compilation and caching)
+    print("\nWarming up...")
+    _ = full_polars_pipeline()
+    _ = full_duckdb_pipeline()
+    print("Warm-up complete!\n")
+
+    # Actual timing with multiple runs
     n_runs = 100
+    print(f"Running {n_runs} iterations for each approach...\n")
 
-    start = time.perf_counter()
-    for _ in range(n_runs):
-        result_polars = polars_approach(test_df.clone())
-    end = time.perf_counter()
-    polars_time = (end - start) / n_runs
+    # Time Polars
+    polars_times = []
+    for i in range(n_runs):
+        start = time.perf_counter()
+        result_polars = full_polars_pipeline()
+        end = time.perf_counter()
+        polars_times.append(end - start)
+    #    print(f"  Polars run {i + 1}: {polars_times[-1] * 1000:.2f}ms")
 
-    start = time.perf_counter()
-    for _ in range(n_runs):
-        result_duckdb = duckdb_approach(test_df_collected)
-    end = time.perf_counter()
-    duckdb_time = (end - start) / n_runs
+    # Time DuckDB
+    duckdb_times = []
+    for i in range(n_runs):
+        start = time.perf_counter()
+        result_duckdb = full_duckdb_pipeline()
+        end = time.perf_counter()
+        duckdb_times.append(end - start)
+    #    print(f"  DuckDB run {i + 1}: {duckdb_times[-1] * 1000:.2f}ms")
 
-    print(f"Polars: {polars_time * 1000:.2f}ms")
-    print(f"DuckDB: {duckdb_time * 1000:.2f}ms")
+    # Statistics
+    polars_avg = sum(polars_times) / n_runs
+    duckdb_avg = sum(duckdb_times) / n_runs
+    polars_min = min(polars_times)
+    duckdb_min = min(duckdb_times)
+
+    # Results
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
     print(
-        f"Winner: {'Polars' if polars_time < duckdb_time else 'DuckDB'} by {abs(polars_time - duckdb_time) / min(polars_time, duckdb_time) * 100:.1f}%"
+        f"Polars average:  {polars_avg * 1000:.2f}ms (min: {polars_min * 1000:.2f}ms)"
+    )
+    print(
+        f"DuckDB average:  {duckdb_avg * 1000:.2f}ms (min: {duckdb_min * 1000:.2f}ms)"
+    )
+    print()
+
+    if polars_avg < duckdb_avg:
+        speedup = (duckdb_avg / polars_avg - 1) * 100
+        print(f"🏆 Polars faster by {speedup:.1f}%")
+    else:
+        speedup = (polars_avg / duckdb_avg - 1) * 100
+        print(f"🏆 DuckDB faster by {speedup:.1f}%")
+
+    # Verify results are equivalent
+    print("\n Same results ?")
+    assert result_polars.shape == result_duckdb.shape, "Row/column counts differ!"
+    print(
+        f"✔️ Both produce {result_polars.shape[0]} rows × {result_polars.shape[1]} columns"
     )
     return
 
@@ -522,23 +697,25 @@ def _(create_conversation_id, df_mess_lvl, duckdb, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    With 100 runs, Duckdb is faster by ~24%.
+    **Results for a test with 100 runs on "train-00000-of-00014.parquet" (180.7mb)**
 
-    2 options:
-    1. Keep polars for the aggregation part
-    2. Use duckdb for the aggregation part
+    *(!todo run the test for the full data, here it's part 1/14 only)*
 
-    Pros of 1. :
-    - Full polars pipeline, can optimize the full pipeline, only collect once at the end
+    Polars is faster by ~35% in this use case. Impressive results, so I will use the full polars pipeline.
+    **Why ?**
 
-    Pros of 2. :
-    - duckdb seemns faster for the aggregation part
-    Cons of 2. :
-    - duckdb collect the intermediate results (df_mess_level) and return a dataframe.
+    - Polars only collect the data once
+    - It optimizes the full lazy pipeline
 
-    To answer this: test both approachs:
-    - Full polars
-    - polars --> duckdb
+    - Duckdb requires to collect twice, for the intermediate result and for the final result
+    - The duckdb pipeline can only optimize each step independently.
+
+
+    Interesting observations for this use case:
+    - The duration difference is negligeable (~300ms)
+    - Duckdb is faster for the aggregation part alone (by ~24% from my tests, which is impressive)
+
+    A full duckdb pipeline, thus in pure SQL, is probably faster
     """)
     return
 
