@@ -21,7 +21,7 @@ def _(mo):
 
     **Duckdb** is great and **Polars** is awsome.
 
-    I could use Duckdb only with the SQL queries but I am more confortable with **Polars's** synthax for complex and chainned modifications to dataframes.
+    I could use Duckdb only and write SQL queries but I am more confortable with **Polars's** synthax for complex and chainned modifications to dataframes.
     They both have lazy excecution and are very fast.
 
     I can use:
@@ -133,71 +133,84 @@ def _(df):
         f"{field}_nested" if field in conflicting_cols else field
         for field in struct_fields
     ]
-    return conflicting_cols, new_fields
+    return (new_fields,)
 
 
 @app.cell
-def _(df, new_fields, pl):
-    df_mess_lvl = (
-        df.with_columns(["conversation_hash", "conversation"])
-        .explode(  # explode the list of struct (-1 layer)
-            "conversation"
+def _(df, new_fields, pl, remove_nolang_messages):
+    # no unique id for conversations so we use the hash + the ip to make one
+    create_conversation_id = (
+        pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
+    ).alias("conversation_id")
+
+
+    # Flatten the data (explode nested variables)
+    df_mess_lvl_raw = (
+        (
+            df.with_columns(["conversation_hash", "conversation"])
+            .explode(  # explode the list of struct (-1 layer)
+                "conversation"
+            )
+            .with_columns(
+                pl.col("conversation").struct.rename_fields(
+                    new_fields
+                )  # var name conflict between original and nested vars
+            )
+            .unnest("conversation", "header")  # unnest the struct (now flat)
+            .drop(
+                "hashed_ip_nested",
+                "header_nested",
+                "state_nested",
+                "country_nested",
+                "toxic",
+                "user-agent",
+                "accept-language",
+                "redacted",
+                "model",
+            )
         )
-        .with_columns(
-            pl.col("conversation").struct.rename_fields(
-                new_fields
-            )  # var name conflict between vars and nested vars
-        )
-        .unnest(  # unnest the struct (now flat)
-            "conversation"
-        )
-        .drop(
-            "hashed_ip_nested",
-            "header_nested",
-            "state_nested",
-            "country_nested",
-            "toxic",
-            "language_nested",
-        )
-        .unnest("header")
+        .rename({"language_nested": "language_message"})
+        .with_columns(create_conversation_id)
     )
+
+    # clean df_mess_lvl_raw
+    df_mess_lvl = remove_nolang_messages(df_mess_lvl_raw)
     return (df_mess_lvl,)
 
 
 @app.cell
 def _(df_mess_lvl, pl):
-    create_conversation_id = (
-        pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
-    ).alias("conversation_id")
-
-    df_conv_lvl = (
-        df_mess_lvl.with_columns(create_conversation_id)
-        .group_by("conversation_id")
-        .agg(
-            [
-                # First user message content
-                pl.col("content")
-                .filter(pl.col("role") == "user")
-                .first()
-                .alias("first_user_content"),
-                # All user messages concatenated
-                pl.col("content")
-                .filter(pl.col("role") == "user")
-                .str.join(delimiter="\n\n")
-                .alias("all_user_content"),
-                # All assistant messages concatenated
-                pl.col("content")
-                .filter(pl.col("role") == "assistant")
-                .str.join(delimiter="\n\n")
-                .alias("all_assistant_content"),
-                # All messages concatenated (user and assistant)
-                pl.col("content").str.join(delimiter="\n\n").alias("all_content"),
-                # Keep other columns (take first value)
-                pl.exclude(
-                    ["content", "turn_identifier", "role", "timestamp"]
-                ).first(),
-            ]
-        )
+    # From the flat dataset, we can aggregate to conversation level
+    df_conv_lvl = df_mess_lvl.group_by("conversation_id").agg(
+        [
+            # First user message content
+            pl.col("content")
+            .filter(pl.col("role") == "user")
+            .first()
+            .alias("first_user_content"),
+            # All user messages concatenated
+            pl.col("content")
+            .filter(pl.col("role") == "user")
+            .str.join(delimiter="\n\n")
+            .alias("all_user_content"),
+            # All assistant messages concatenated
+            pl.col("content")
+            .filter(pl.col("role") == "assistant")
+            .str.join(delimiter="\n\n")
+            .alias("all_assistant_content"),
+            # All messages concatenated (user and assistant)
+            pl.col("content").str.join(delimiter="\n\n").alias("all_content"),
+            # Keep other columns (take first value)
+            pl.exclude(
+                [
+                    "content",
+                    "turn_identifier",
+                    "role",
+                    "timestamp",
+                    "language_message",
+                ]
+            ).first(),
+        ]
     )
     return (df_conv_lvl,)
 
@@ -221,9 +234,37 @@ def _(df, df_conv_lvl, df_mess_lvl, mo):
     - Message
 
     Manipulation:   
-    User level *{df.collect().height} rows* ➡️ Message level *{df_mess_lvl.collect().height} rows* ➡️ Conversation level *{df_conv_lvl.collect().height} rows*
+    **User level** *{df.collect().height} rows* ➡️ **Message level** *{df_mess_lvl.collect().height} rows* ➡️ **Conversation level** *{df_conv_lvl.collect().height} rows*
 
     Most of the users have a single conversation. There is only 71 more conversations than users
+    """)
+    return
+
+
+@app.cell(column=1, hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Data cleaning
+
+    Now that we have prepare the dataset by moving variables around, we can dig into the content and prepare the messages.
+
+    The idea is to remove any content that would worsen the clustering (REFAIREPHRASE) and increase the computation time.
+    We want to clean the data to optimize the computationnal steps (Tokenizations, Lemmatization)
+
+    Specifically, we will clean the messages variables: (here the rows are of type **str**)
+    - remove emails, url and punctuation
+    - remove stopwords from the NLTK list of stopwords
+    - tokenize
+
+    Clean tokens: (here the rows are of type
+    **list[str]**)
+    - remove empty tokens
+    - normalize numbers
+    - remove single characters tokens except a shortlist of word (like pronouns '**I**')
+    - maybe special characters if some found
+    - keep programming tokens ? (x, y , i)
+
+    - lemmatization (done last because takes longer, so done on fewer tokens as possible)
     """)
     return
 
@@ -231,7 +272,55 @@ def _(df, df_conv_lvl, df_mess_lvl, mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Exploration
+    ### Messages cleaning
+    """)
+    return
+
+
+@app.cell
+def _(pl):
+    def remove_nolang_messages(df: pl.LazyFrame) -> pl.LazyFrame:
+        """
+        1. Removes first turns (user + assistant) where user message is empty (Nolang)
+        2. Removes any other remaining Nolang messages
+        """
+        first_turn_empty = (
+            df.filter(
+                (pl.col("turn") == 1) & (pl.col("language_message") == "Nolang")
+            )
+            .select(["conversation_id", "turn_identifier"])
+            .unique()
+        )
+
+        if first_turn_empty.head(1).collect().height > 0:
+            df = df.join(  # 1
+                first_turn_empty,
+                on=["conversation_id", "turn_identifier"],
+                how="anti",
+            )
+
+        return df.remove(pl.col("language_message") == "Nolang")  # 2
+    return (remove_nolang_messages,)
+
+
+@app.cell
+def _():
+    # TOADD: function to remove non english messages
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Conversations cleaning
+    """)
+    return
+
+
+@app.cell(column=2, hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Data Exploration
 
     Conversations are a set of messages between the user and the assistant (AI).
     What are baasic elements about the conversations and messages ?
@@ -246,10 +335,151 @@ def _(mo):
 
 @app.cell
 def _():
+    import altair as alt
+    return (alt,)
+
+
+@app.cell
+def _():
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    return (plt,)
+
+
+@app.cell
+def _(alt, df_conv_lvl, mo):
+    df_plots = df_conv_lvl.head(500).collect()  # 500 sample
+
+    plot_nbr_turns = (
+        alt.Chart(df_plots)
+        .mark_bar()
+        .encode(x=alt.X("turn:N", labelAngle=0), y=alt.Y("count()", title=""))
+        .properties(title="Count of turns")
+    )
+
+
+    mo.ui.altair_chart(plot_nbr_turns)
+
+    """ seaborn version of the plot
+    plt.figure(figsize=(10, 6))
+    sns.countplot(data=df_conv_lvl.collect(), x="turn")
+    plt.xticks(rotation=0)  # Keep x-axis labels horizontal
+    plt.title("Count of turns")
+    plt.ylabel("Count")
+    plt.xlabel("Turn")
+    plt.show()
+    """
     return
 
 
-@app.cell(column=1, hide_code=True)
+@app.cell
+def _(alt, df_mess_lvl, mo):
+    _test = (
+        df_mess_lvl.collect()
+        .head(100)
+        .group_by("conversation_hash")
+        .len(name="nbr_mess_per_conv")
+    )
+
+
+    nbr_mess_per_conv = (
+        alt.Chart(_test)
+        .mark_bar()
+        .encode(
+            x=alt.X("nbr_mess_per_conv:N", title="Number of messages"),
+            y=alt.Y("count()", title="Number of conversations"),
+        )
+        .properties(title="Number of conversations with n messages")
+    )
+
+    mo.ui.altair_chart(nbr_mess_per_conv)
+
+
+    """ seaborn version of the plot
+    _test = (
+        df_mess_lvl.collect()
+        .head(100)
+        .group_by("conversation_hash")
+        .len(name="nbr_mess_per_conv")
+    )
+
+    plt.figure(figsize=(10, 6))
+    sns.countplot(
+        data=_test,
+        x='nbr_mess_per_conv',
+        hue='nbr_mess_per_conv',
+        palette='colorblind'
+    )
+    plt.title("Number of conversations with n messages")
+    plt.xlabel("Number of messages")
+    plt.ylabel("Number of conversations")
+    plt.xticks(rotation=45)  # Rotate x-axis labels if needed
+    plt.tight_layout()
+    plt.show()
+    """
+    return
+
+
+@app.cell
+def _(alt, df_mess_lvl, mo):
+    _test = df_mess_lvl.collect().sample(100).group_by("role").len()
+
+    ratio_role = (
+        alt.Chart(_test)
+        .mark_arc(innerRadius=50)
+        .encode(
+            theta=alt.Theta("len:Q"),
+            color=alt.Color(
+                "role:N",
+            ),
+        )
+        .properties(
+            title="User vs Assistant Message Distribution", width=200, height=150
+        )
+    )
+
+
+    _left_label = (
+        ratio_role.transform_filter(alt.datum.role == "user")
+        .mark_text(dx=-95, fontSize=30, fontWeight="bold")
+        .encode(text="len:Q", color=alt.value("black"))
+    )
+    _right_label = (
+        ratio_role.transform_filter(alt.datum.role == "assistant")
+        .mark_text(dx=95, fontSize=30, fontWeight="bold")
+        .encode(text="len:Q", color=alt.value("black"))
+    )
+    _percent_label = ratio_role.mark_text(
+        fontSize=60,
+        text="%",
+    ).encode(color=alt.value("black"))
+
+    mo.ui.altair_chart(ratio_role + _left_label + _right_label + _percent_label)
+    return
+
+
+@app.cell
+def _(clean_messages, df_conv_lvl, pl, plt, stop_pattern):
+    from wordcloud import WordCloud
+
+    _df_wc = df_conv_lvl.head(500).collect().pipe(clean_messages, stop_pattern)
+
+
+    text = _df_wc.select(
+        pl.col("cleaned_content").list.join(" ").str.join(" ")
+    ).item()
+
+
+    wordcloud = WordCloud().generate(text)
+
+    plt.figure()
+    plt.imshow(wordcloud, interpolation="bilinear")
+    plt.axis("off")
+    plt.show()
+    return
+
+
+@app.cell(column=3, hide_code=True)
 def _(mo):
     mo.md(r"""
     # Test zone
@@ -260,47 +490,6 @@ def _(mo):
 @app.cell
 def _(df):
     dff = df.head(30)
-    return (dff,)
-
-
-@app.cell
-def _(conflicting_cols, dff):
-    _struct_fields = (
-        dff.select("conversation")
-        .explode("conversation")
-        .head(0)
-        .collect()
-        .to_series()
-        .struct.fields
-    )
-
-    _new_fields = [
-        f"{field}_nested" if field in conflicting_cols else field
-        for field in _struct_fields
-    ]
-    _struct_fields
-    return
-
-
-@app.cell
-def _(dff):
-    # Same variables names in the nested vars of 'conversation'. We have to rename them before unnesting
-    # We do it his way because we wwant to keep the original names on the vars and some nested vars will be removed bc of duplication of info
-    _conflicting_cols = ["language", "country", "state", "hashed_ip", "header"]
-
-    _struct_fields = (
-        dff.select("conversation")
-        .explode("conversation")
-        .head(0)  # don't care about the data, only the var names
-        .collect()  # need eager to extract the list
-        .to_series()
-        .struct.fields
-    )
-
-    _new_fields = [
-        f"{field}_nested" if field in _conflicting_cols else field
-        for field in _struct_fields
-    ]
     return
 
 
@@ -334,81 +523,10 @@ def _():
     return
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ---
-    """)
-    return
-
-
 @app.cell
-def _(df_mess_lvl):
-    dft = df_mess_lvl.head(100).collect()
-    return (dft,)
-
-
-@app.cell
-def _(mo):
-    mo.md(r"""
-    aggregate back to conversation level
-    - 1 var for the first user message
-    - 1 var for all user messages
-    - 1 var for all assistant messages
-    - 1 var with ALL the messages combined
-
-    'turn' gives the number of round user-assitant
-    'hashed_id' is the identifier of the HUMAN that talked to chatgptp (USER level)
-    'conversation_hash' is the identifier of the conversation (set of messages) for a given hashed_ip (CONVERSATION level)
-
-    'turn_identifier' gives us the couples user/ assistant fro 2 messages. The *user* message is the first one to come up (MESSAGE level)
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ---
-    """)
-    return
-
-
-@app.cell
-def _(df_mess_lvl, pl):
-    _create_conversation_id = (
-        pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
-    ).alias("conversation_id")
-
-    _df_conv_lvl = (
-        df_mess_lvl.with_columns(_create_conversation_id)
-        .group_by("conversation_id")
-        .agg(
-            [
-                # First user message content
-                pl.col("content")
-                .filter(pl.col("role") == "user")
-                .first()
-                .alias("first_user_content"),
-                # All user messages concatenated
-                pl.col("content")
-                .filter(pl.col("role") == "user")
-                .str.join(delimiter="\n\n")
-                .alias("all_user_content"),
-                # All assistant messages concatenated
-                pl.col("content")
-                .filter(pl.col("role") == "assistant")
-                .str.join(delimiter="\n\n")
-                .alias("all_assistant_content"),
-                # All messages concatenated (user and assistant)
-                pl.col("content").str.join(delimiter="\n\n").alias("all_content"),
-                # Keep other columns (take first value)
-                pl.exclude(
-                    ["content", "turn_identifier", "role", "timestamp"]
-                ).first(),
-            ]
-        )
-    )
+def _():
+    # how many non english messages ?
+    # ~10% on file 0014
     return
 
 
@@ -422,300 +540,270 @@ def _(mo):
 
 @app.cell
 def _():
-    import altair as alt
-    return (alt,)
+    import nltk
+
+    try:
+        nltk.data.find("corpora/stopwords")
+        from nltk.corpus import stopwords
+    except LookupError:
+        nltk.download("stopwords")
+
+    # corpus should be in "User/nltk_data/corpus"
+    return (stopwords,)
 
 
 @app.cell
-def _(dft):
-    dft
+def _(STOP_WORDS):
+    STOP_WORDS
     return
 
 
 @app.cell
-def _(alt, dft, mo):
-    chart = (
-        alt.Chart(dft)
-        .mark_bar()
-        .encode(
-            x=alt.X("turn:N", labelAngle=0),
-            y="count()",
-        )
-        .properties(title="Count of turns")
-    )
+def _(stopwords):
+    STOP_WORDS = set(stopwords.words("english"))
 
-    mo.ui.altair_chart(chart)
-    return
+    remove_from_stopwords = {"i", "who", 'how', 'you'}  # fmt: skip
+    STOP_WORDS.difference_update(remove_from_stopwords)
 
 
-@app.cell(column=2, hide_code=True)
-def _(mo):
-    mo.md(r"""
-    # Speed contest for aggregation - Polars vs Duckdb
-    """)
+    stop_pattern = "|".join(f"\\b{word}\\b" for word in STOP_WORDS)
+    return STOP_WORDS, stop_pattern
+
+
+@app.cell
+def _(df_conv_lvl):
+    dft = df_conv_lvl.head(100).collect()
     return
 
 
 @app.cell
-def _(df_mess_lvl, duckdb, pl):
-    import time
-
-    # ============================================================================
-    # PIPELINE FUNCTIONS
-    # ============================================================================
+def _():
+    # removed at least 1 message composed with stop words only ('how are you?')
+    return
 
 
-    def full_polars_pipeline():
-        """Complete Polars pipeline: import -> transform -> aggregate -> collect once"""
-
-        # Step 1: Import data
-        df = (
-            duckdb.query(
-                """
-                SELECT * EXCLUDE (toxic, timestamp, redacted, openai_moderation, detoxify_moderation)
-                FROM 'data/raw/train-00000-of-00014.parquet' 
-                WHERE language = 'English'
-                """
-            )
-            .pl(lazy=True)
-            .rename({"language": "lang_conv"})
+@app.cell
+def _(pl):
+    def clean_messages(lf: pl.LazyFrame, stop_pattern: str) -> pl.LazyFrame:
+        return lf.with_columns(
+            pl.col("first_user_content")
+            .str.to_lowercase()
+            .str.replace_all(r"https?://\S+|www\.\S+", "")  # remove URLs
+            .str.replace_all(r"\S+@\S+", "")  # remove emails
+            .str.replace_all(r"[[:punct:]]", "")  # remove punctuation
+            .str.replace_all(stop_pattern, "")  # remove stop words
+            .str.replace_all(r"\s+", " ")  # many whitespaces to a single one
+            .str.strip_chars()
+            .str.split(" ")  # tokenize
+            .alias("cleaned_content")
         )
+    return (clean_messages,)
 
-        # Step 2: Unnesting and transformation
-        conflicting_cols = ["language", "country", "state", "hashed_ip", "header"]
-        struct_fields = (
-            df.select("conversation")
-            .explode("conversation")
-            .head(0)
-            .collect()
-            .to_series()
-            .struct.fields
-        )
-        new_fields = [
-            f"{field}_nested" if field in conflicting_cols else field
-            for field in struct_fields
+
+@app.cell
+def _(clean_messages, df_conv_lvl, stop_pattern):
+    _df_tokens = clean_messages(df_conv_lvl, stop_pattern)
+    return
+
+
+@app.cell
+def _(df_conv_lvl, pl, stop_pattern):
+    def clean_messages_vars(
+        lf: pl.LazyFrame, columns: str | list[str], stop_pattern: str
+    ) -> pl.LazyFrame:
+        """
+        Clean text columns and tokenize
+        """
+        if isinstance(columns, str):
+            columns = [columns]
+
+        cleaned_cols = [
+            pl.col(col)
+            .str.to_lowercase()
+            .str.replace_all(r"https?://\S+|www\.\S+", "")  # remove URLs
+            .str.replace_all(r"\S+@\S+", "")  # remove emails
+            .str.replace_all(r"[[:punct:]]", "")  # remove punctuation
+            .str.replace_all(stop_pattern, "")  # remove stop words
+            .str.replace_all(r"\s+", " ")  # normalize whitespace
+            .str.strip_chars()
+            .str.split(" ")  # tokenize
+            for col in columns
         ]
 
-        df_mess_lvl = (
-            df.with_columns(["conversation_hash", "conversation"])
-            .explode("conversation")
-            .with_columns(pl.col("conversation").struct.rename_fields(new_fields))
-            .unnest("conversation")
-            .drop(
-                "hashed_ip_nested",
-                "header_nested",
-                "state_nested",
-                "country_nested",
-                "toxic",
-                "language_nested",
+        return lf.with_columns(cleaned_cols).rename(
+            {col: f"{col}_tokens" for col in columns}
+        )
+
+
+    vars_to_tokenize = ["first_user_content"]
+    df_tokens = clean_messages_vars(df_conv_lvl, vars_to_tokenize, stop_pattern)
+    return (df_tokens,)
+
+
+@app.cell
+def _(df_conv_lvl, pl, stop_pattern):
+    df_conv_lvl.with_columns(
+        pl.col(["first_user_content", "all_user_content"])
+        .str.to_lowercase()
+        .str.replace_all(r"https?://\S+|www\.\S+", "")  # remove URLs
+        .str.replace_all(r"\S+@\S+", "")  # remove emails
+        .str.replace_all(r"[[:punct:]]", "")  # remove punctuation
+        .str.replace_all(stop_pattern, "")  # remove stop words
+        .str.replace_all(r"\s+", " ")  # many whitespaces to a single one
+        .str.strip_chars()
+        .str.split(" ")  # tokenize
+    ).rename({"first_user_content": "first_user_content_tokens"})
+    return
+
+
+@app.cell
+def _():
+    import spacy
+    from spacy.tokens import Doc
+
+    nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
+    # nlp = spacy.load("en_core_web_sm", disable=["parser", "ner", "morphologizer"])
+    return (nlp,)
+
+
+@app.cell
+def _(df_tokens):
+    df_test = (
+        df_tokens.head(1000).collect().lazy()
+    )  # keep the same head content, otherwise randomly pulls
+    return (df_test,)
+
+
+@app.cell
+def _(df, pl):
+    empty_strings = df.filter(pl.col("text_column") == "")
+    return
+
+
+@app.cell
+def _(df_tokens, pl):
+    df_tokens.collect().with_columns(
+        pl.col("first_user_content_tokens")
+        .list.eval(pl.element().filter(pl.element() == ""))
+        .list.len()
+        .alias("empty_count")
+    )
+    return
+
+
+@app.cell
+def _(df_conv_lvl):
+    df_conv_lvl.select("conversation_id", "first_user_content").collect()
+    return
+
+
+@app.cell
+def _(df_test, nlp, pl):
+    def lemmatize_tokens_batch(token_lists: list[list[str]]) -> list[list[str]]:
+        """
+        Lemmatize batches of token lists using spaCy's pipe.
+        """
+
+        texts = [" ".join(tokens) for tokens in token_lists]
+
+        # docs = [Doc(nlp.vocab, words=token_list) for token_list in texts]
+
+        docs = nlp.pipe(texts)
+
+        # Extract lemmas
+        lemmatized = [[token.lemma_ for token in doc] for doc in docs]
+
+        return lemmatized
+
+
+    # Apply with map_batches for parallel processing
+    df_result = (
+        df_test.with_columns(
+            pl.col("first_user_content_tokens")
+            .map_batches(
+                lambda series: pl.Series(
+                    [lemmatize_tokens_batch(series.to_list())][0]
+                ),
+                return_dtype=pl.List(pl.String),
             )
-            .unnest("header")
+            .alias("lemmatized_tokens")
         )
-
-        # Step 3: Aggregation
-        create_conversation_id = (
-            pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
-        ).alias("conversation_id")
-
-        df_conv_lvl = (
-            df_mess_lvl.with_columns(create_conversation_id)
-            .group_by("conversation_id")
-            .agg(
-                [
-                    pl.col("content")
-                    .filter(pl.col("role") == "user")
-                    .first()
-                    .alias("first_user_content"),
-                    pl.col("content")
-                    .filter(pl.col("role") == "user")
-                    .str.join(delimiter="\n\n")
-                    .alias("all_user_content"),
-                    pl.col("content")
-                    .filter(pl.col("role") == "assistant")
-                    .str.join(delimiter="\n\n")
-                    .alias("all_assistant_content"),
-                    pl.col("content")
-                    .str.join(delimiter="\n\n")
-                    .alias("all_content"),
-                    pl.exclude(
-                        ["content", "turn_identifier", "role", "timestamp"]
-                    ).first(),
-                ]
-            )
-            .collect()  # Single collect at the end
-        )
-
-        return df_conv_lvl
+    ).collect(engine="streaming")
+    return (df_result,)
 
 
-    def full_duckdb_pipeline():
-        """Complete DuckDB pipeline: import -> transform (polars) -> aggregate (duckdb)"""
+@app.cell
+def _(df_result):
+    df_result["conversation_id", "first_user_content_tokens", "lemmatized_tokens"]
+    return
 
-        # Step 1: Import data
-        df = (
-            duckdb.query(
-                """
-                SELECT * EXCLUDE (toxic, timestamp, redacted, openai_moderation, detoxify_moderation)
-                FROM 'data/raw/train-00000-of-00014.parquet' 
-                WHERE language = 'English'
-                """
-            )
-            .pl(lazy=True)
-            .rename({"language": "lang_conv"})
-        )
 
-        # Step 2: Unnesting and transformation (using Polars)
-        conflicting_cols = ["language", "country", "state", "hashed_ip", "header"]
-        struct_fields = (
-            df.select("conversation")
-            .explode("conversation")
-            .head(0)
-            .collect()
-            .to_series()
-            .struct.fields
-        )
-        new_fields = [
-            f"{field}_nested" if field in conflicting_cols else field
-            for field in struct_fields
+@app.cell
+def _(df_tokens, pl):
+    df_tokens.filter(
+        pl.col("conversation_id")
+        == "a5aae6199e4cbb97f020337bce9dbf66_ff02a68ec3eb845852b0d02da7403246f4ae93b9a12a0cde19304bd21337b358"
+    )
+    return
+
+
+@app.cell
+def _(df_test, pl):
+    df_test.with_columns(pl.col("first_user_content_tokens")).collect_schema()
+    return
+
+
+@app.cell
+def _(df_test, pl):
+    # working nicely
+    from simplemma import lemmatize
+
+
+    def fast_lemmatize(token_lists: list[str]) -> list[str]:
+        """Ultra-fast lemmatization without NLP pipeline."""
+        return [lemmatize(token, lang="en") for token in token_lists]
+
+
+    _df_result = df_test.with_columns(
+        pl.col("first_user_content_tokens")
+        .map_elements(fast_lemmatize, return_dtype=pl.List(pl.String))
+        .alias("lemmatized_tokens")
+    ).collect(engine="streaming")
+
+    _df_result["first_user_content_tokens", "lemmatized_tokens"]
+    return
+
+
+@app.cell
+def _(df_test, pl, simplemma):
+    def _lemmatize_tokens_batch(token_lists: list[list[str]]) -> list[list[str]]:
+        """
+        Lemmatize batches of token lists using simplemma.
+        """
+        lemmatized = [
+            [simplemma.lemmatize(token, lang="en") for token in token_lists]
+            for token_list in token_lists
         ]
+        return lemmatized
 
-        df_mess_lvl = (
-            df.with_columns(["conversation_hash", "conversation"])
-            .explode("conversation")
-            .with_columns(pl.col("conversation").struct.rename_fields(new_fields))
-            .unnest("conversation")
-            .drop(
-                "hashed_ip_nested",
-                "header_nested",
-                "state_nested",
-                "country_nested",
-                "toxic",
-                "language_nested",
+
+    # Apply with map_batches for parallel processing
+    _df_result = df_test.with_columns(
+        pl.col("first_user_content_tokens")
+        .map_batches(
+            lambda series: pl.Series(
+                [_lemmatize_tokens_batch(series.to_list())][0]
             )
-            .unnest("header")
-            .collect()  # FIRST collect for DuckDB to work with
         )
-
-        # Step 3: Aggregation using DuckDB
-        df_final = duckdb.sql("""
-            SELECT 
-                conversation_hash || '_' || hashed_ip as conversation_id,        
-                (ARRAY_AGG(content ORDER BY turn_identifier) 
-                 FILTER (WHERE role = 'user'))[1] as first_user_content,
-                STRING_AGG(content, '\n\n' ORDER BY turn_identifier) 
-                 FILTER (WHERE role = 'user') as all_user_content,
-                STRING_AGG(content, '\n\n' ORDER BY turn_identifier) 
-                 FILTER (WHERE role = 'assistant') as all_assistant_content,
-                STRING_AGG(content, '\n\n' ORDER BY turn_identifier) as all_content,
-                FIRST(conversation_hash) as conversation_hash,
-                FIRST(hashed_ip) as hashed_ip,
-                FIRST(lang_conv) as lang_conv,
-                FIRST(model) as model,
-                FIRST(redacted) as redacted,
-                FIRST(turn) as turn,
-                FIRST(state) as state,
-                FIRST(country) as country,
-                FIRST('accept-language') as 'accept-language',
-                FIRST('user-agent') as 'user-agent',
-            FROM df_mess_lvl
-            GROUP BY conversation_id
-        """).pl()  # SECOND collect (implicit in .pl())
-
-        return df_final
-
-
-    # ============================================================================
-    # BENCHMARK EXECUTION
-    # ============================================================================
-
-    print("=" * 70)
-    print("FULL PIPELINE BENCHMARK: DuckDB vs Polars")
-    print("=" * 70)
-
-    # Warm-up runs (crucial for JIT compilation and caching)
-    print("\nWarming up...")
-    _ = full_polars_pipeline()
-    _ = full_duckdb_pipeline()
-    print("Warm-up complete!\n")
-
-    # Actual timing with multiple runs
-    n_runs = 100
-    print(f"Running {n_runs} iterations for each approach...\n")
-
-    # Time Polars
-    polars_times = []
-    for i in range(n_runs):
-        start = time.perf_counter()
-        result_polars = full_polars_pipeline()
-        end = time.perf_counter()
-        polars_times.append(end - start)
-    #    print(f"  Polars run {i + 1}: {polars_times[-1] * 1000:.2f}ms")
-
-    # Time DuckDB
-    duckdb_times = []
-    for i in range(n_runs):
-        start = time.perf_counter()
-        result_duckdb = full_duckdb_pipeline()
-        end = time.perf_counter()
-        duckdb_times.append(end - start)
-    #    print(f"  DuckDB run {i + 1}: {duckdb_times[-1] * 1000:.2f}ms")
-
-    # Statistics
-    polars_avg = sum(polars_times) / n_runs
-    duckdb_avg = sum(duckdb_times) / n_runs
-    polars_min = min(polars_times)
-    duckdb_min = min(duckdb_times)
-
-    # Results
-    print("\n" + "=" * 70)
-    print("RESULTS")
-    print("=" * 70)
-    print(
-        f"Polars average:  {polars_avg * 1000:.2f}ms (min: {polars_min * 1000:.2f}ms)"
-    )
-    print(
-        f"DuckDB average:  {duckdb_avg * 1000:.2f}ms (min: {duckdb_min * 1000:.2f}ms)"
-    )
-    print()
-
-    if polars_avg < duckdb_avg:
-        speedup = (duckdb_avg / polars_avg - 1) * 100
-        print(f"🏆 Polars faster by {speedup:.1f}%")
-    else:
-        speedup = (polars_avg / duckdb_avg - 1) * 100
-        print(f"🏆 DuckDB faster by {speedup:.1f}%")
-
-    # Verify results are equivalent
-    print("\n Same results ?")
-    assert result_polars.shape == result_duckdb.shape, "Row/column counts differ!"
-    print(
-        f"✔️ Both produce {result_polars.shape[0]} rows × {result_polars.shape[1]} columns"
-    )
+        .alias("lemmatized_tokens")
+    ).collect(engine="streaming")
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    **Results for a test with 100 runs on "train-00000-of-00014.parquet" (180.7mb)**
-
-    *(!todo run the test for the full data, here it's part 1/14 only)*
-
-    Polars is faster by ~35% in this use case. Impressive results, so I will use the full polars pipeline.
-    **Why ?**
-
-    - Polars only collect the data once
-    - It optimizes the full lazy pipeline
-
-    - Duckdb requires to collect twice, for the intermediate result and for the final result
-    - The duckdb pipeline can only optimize each step independently.
-
-
-    Interesting observations for this use case:
-    - The duration difference is negligeable (~300ms)
-    - Duckdb is faster for the aggregation part alone (by ~24% from my tests, which is impressive)
-
-    A full duckdb pipeline, thus in pure SQL, is probably faster
+    ---
     """)
     return
 
