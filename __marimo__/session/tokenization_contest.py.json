@@ -1,0 +1,135 @@
+{
+  "version": "1",
+  "metadata": {
+    "marimo_version": "0.17.7"
+  },
+  "cells": [
+    {
+      "id": "Hbol",
+      "code_hash": "1d0db38904205bec4d6f6f6a1f6cec3e",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "BdKu",
+      "code_hash": "d4ede4f11371d62456afa9ca515b892e",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h1 id=\"comparison-polars-vs-spacy-clean-and-tokenize-text\">Comparison Polars vs Spacy - Clean and tokenize text</h1>\n<ul>\n<li>Polars is faster and itegrates better with the rest of the code</li>\n<li>Spacy provides a better linguistic quality</li>\n</ul>\n<span class=\"paragraph\">What is the speed difference between the 2 ?\nWhat are the quality improvements from Spacy ?</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "KPpa",
+      "code_hash": "6760dd7facb6fa2496eac7a6764c3a2b",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h3 id=\"set-up-and-load-data\">Set up and load data</h3>\n<span class=\"paragraph\">Run once to get the data</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "wxLS",
+      "code_hash": null,
+      "outputs": [],
+      "console": []
+    },
+    {
+      "id": "sYQs",
+      "code_hash": "c81cb5063fb0bd37d5dd6646ef5b62f2",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h3 id=\"contest\">Contest</h3>\n<span class=\"paragraph\">Polars</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "wmek",
+      "code_hash": null,
+      "outputs": [],
+      "console": []
+    },
+    {
+      "id": "soLk",
+      "code_hash": "c26a2fea7c83906066af160afad98f5f",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\">Spacy</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "tHZW",
+      "code_hash": null,
+      "outputs": [],
+      "console": []
+    },
+    {
+      "id": "toKx",
+      "code_hash": null,
+      "outputs": [],
+      "console": []
+    },
+    {
+      "id": "WNFx",
+      "code_hash": "d5f24ee654dfdc47fdd4e197e5d22f70",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><hr /></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "YpEt",
+      "code_hash": null,
+      "outputs": [],
+      "console": []
+    },
+    {
+      "id": "gQnD",
+      "code_hash": null,
+      "outputs": [],
+      "console": []
+    },
+    {
+      "id": "cafF",
+      "code_hash": "9b8576fa4525c632d6f6cf772791a62a",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\">Spacy is way too slow. I will either stay with polars, or find another tokeniser library like Tokenizers from Huggingface</span></span>"
+          }
+        }
+      ],
+      "console": []
+    }
+  ]
+}

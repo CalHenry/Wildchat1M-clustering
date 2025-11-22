@@ -9,7 +9,22 @@ def _():
     import marimo as mo
     import duckdb
     import polars as pl
-    return duckdb, mo, pl
+    import numpy as np
+    from simplemma import lemmatize
+    return duckdb, lemmatize, mo, np, pl
+
+
+@app.cell
+def _():
+    # fmt: off
+    try:
+        from nltk.corpus import stopwords
+    except LookupError:
+        import nltk
+        nltk.download("stopwords")  # should go to "User/nltk_data/corpus"
+        from nltk.corpus import stopwords
+        print('stopwords downloaded ✅')
+    return (stopwords,)
 
 
 @app.cell(hide_code=True)
@@ -57,6 +72,8 @@ def _(mo):
     2. We specify that we want to convert the query's result to Polars df.
     As soon as ```.pl(lazy=True)``` is written, the object is now a polars LazyFrame, to which i can apply polars code.
     I used both libraries in the same sequence.
+
+    > I'll use the abbreviation '**lf**' for lazyframes to differentiate with dataframes
     """)
     return
 
@@ -64,7 +81,7 @@ def _(mo):
 @app.cell
 def _(duckdb):
     # Load data (lazy)
-    df = (
+    lf = (
         duckdb.query(
             """
         SELECT * EXCLUDE (toxic, timestamp, redacted, openai_moderation, detoxify_moderation)
@@ -75,7 +92,7 @@ def _(duckdb):
         .pl(lazy=True)
         .rename({"language": "lang_conv"})
     )
-    return (df,)
+    return (lf,)
 
 
 @app.cell(hide_code=True)
@@ -114,14 +131,14 @@ def _(mo):
 
 
 @app.cell
-def _(df):
+def _(lf):
     # Same variables names in the nested vars of 'conversation'. We have to rename them before unnesting
     # We do it his way because we want to keep the names on the front vars and remove some nested vars bc their info is already in the front vars
 
     conflicting_cols = ["language", "country", "state", "hashed_ip", "header"]
 
     struct_fields = (
-        df.select("conversation")
+        lf.select("conversation")
         .explode("conversation")
         .head(0)  # don't care about the data, only the var names
         .collect()  # need eager to extract the list
@@ -137,7 +154,7 @@ def _(df):
 
 
 @app.cell
-def _(df, new_fields, pl, remove_nolang_messages):
+def _(lf, new_fields, pl, remove_nolang_messages, remove_non_english_mess):
     # no unique id for conversations so we use the hash + the ip to make one
     create_conversation_id = (
         pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
@@ -145,9 +162,9 @@ def _(df, new_fields, pl, remove_nolang_messages):
 
 
     # Flatten the data (explode nested variables)
-    df_mess_lvl_raw = (
+    lf_mess_raw = (
         (
-            df.with_columns(["conversation_hash", "conversation"])
+            lf.with_columns(["conversation_hash", "conversation"])
             .explode(  # explode the list of struct (-1 layer)
                 "conversation"
             )
@@ -173,15 +190,17 @@ def _(df, new_fields, pl, remove_nolang_messages):
         .with_columns(create_conversation_id)
     )
 
-    # clean df_mess_lvl_raw
-    df_mess_lvl = remove_nolang_messages(df_mess_lvl_raw)
-    return (df_mess_lvl,)
+    # Clean messages of lf_mess_lvl_raw)
+    lf_mess = lf_mess_raw.pipe(remove_nolang_messages).pipe(
+        remove_non_english_mess
+    )
+    return (lf_mess,)
 
 
 @app.cell
-def _(df_mess_lvl, pl):
-    # From the flat dataset, we can aggregate to conversation level
-    df_conv_lvl = df_mess_lvl.group_by("conversation_id").agg(
+def _(get_stopwords_pattern, lf_mess, pl, process_message_tokens):
+    # From the flat message dataset, we can aggregate to conversation level
+    lf_conv_init = lf_mess.group_by("conversation_id").agg(
         [
             # First user message content
             pl.col("content")
@@ -212,7 +231,39 @@ def _(df_mess_lvl, pl):
             ).first(),
         ]
     )
-    return (df_conv_lvl,)
+
+    # We can now clean and tokenize the messages
+    # get stopwords from NLTK as regex string
+    stop_pattern = get_stopwords_pattern()
+
+    # Clean aggregated messages of lf_conv_lvl_init
+    lf_conv, vocab = process_message_tokens(
+        lf_conv_init, "first_user_content", stop_pattern
+    )
+    return lf_conv, vocab
+
+
+@app.cell(hide_code=True)
+def _(lf, lf_conv_lvl, lf_mess_lvl, mo):
+    mo.md(rf"""
+    Takeway: 
+
+    3 levels in the data:
+    - User (top level, raw data)
+    - Conversation (user can have [1:n] conversations)
+    - Message
+
+    Manipulation:   
+    **User level** *{lf.collect().height} rows* ➡️ **Message level** *{lf_mess_lvl.collect().height} rows* ➡️ **Conversation level** *{lf_conv_lvl.collect().height} rows*
+
+    Most of the users have a single conversation. There is only 71 more conversations than users.
+
+    We prepared the data for embedding.
+    We focus on the english conversations and english messages.
+    Some cleanings had to be done at the message level, but most of them are done at the conversation because it's faster.
+    We designed some functions (lemmatization) and choose some libraries over others to have better performances (**simplemma** over **spacy** aka speed over quality)
+    """)
+    return
 
 
 @app.cell(hide_code=True)
@@ -223,21 +274,17 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
-def _(df, df_conv_lvl, df_mess_lvl, mo):
-    mo.md(rf"""
-    Takeway: 
+@app.cell
+def _(lf_conv):
+    df_conv = lf_conv.collect()
+    return (df_conv,)
 
-    3 levels in the data:
-    - User (top level, raw data)
-    - Conversation (1 user can have [1:n] conversations)
-    - Message
 
-    Manipulation:   
-    **User level** *{df.collect().height} rows* ➡️ **Message level** *{df_mess_lvl.collect().height} rows* ➡️ **Conversation level** *{df_conv_lvl.collect().height} rows*
+@app.cell
+def _(lf_conv):
+    # save to parquet
 
-    Most of the users have a single conversation. There is only 71 more conversations than users
-    """)
+    lf_conv.sink_parquet("data/clean/lf_conv.parquet")
     return
 
 
@@ -251,13 +298,12 @@ def _(mo):
     The idea is to remove any content that would worsen the clustering (REFAIREPHRASE) and increase the computation time.
     We want to clean the data to optimize the computationnal steps (Tokenizations, Lemmatization)
 
-    Specifically, we will clean the messages variables: (here the rows are of type **str**)
+    Clean messages: (here the rows are of type **str**)
     - remove emails, url and punctuation
     - remove stopwords from the NLTK list of stopwords
     - tokenize
 
-    Clean tokens: (here the rows are of type
-    **list[str]**)
+    Clean tokens: (here the rows are of type **list[str]**)
     - remove empty tokens
     - normalize numbers
     - remove single characters tokens except a shortlist of word (like pronouns '**I**')
@@ -279,13 +325,13 @@ def _(mo):
 
 @app.cell
 def _(pl):
-    def remove_nolang_messages(df: pl.LazyFrame) -> pl.LazyFrame:
+    def remove_nolang_messages(lf_mess: pl.LazyFrame) -> pl.LazyFrame:
         """
         1. Removes first turns (user + assistant) where user message is empty (Nolang)
         2. Removes any other remaining Nolang messages
         """
         first_turn_empty = (
-            df.filter(
+            lf_mess.filter(
                 (pl.col("turn") == 1) & (pl.col("language_message") == "Nolang")
             )
             .select(["conversation_id", "turn_identifier"])
@@ -293,20 +339,25 @@ def _(pl):
         )
 
         if first_turn_empty.head(1).collect().height > 0:
-            df = df.join(  # 1
+            lf_mess = lf_mess.join(  # 1.
                 first_turn_empty,
                 on=["conversation_id", "turn_identifier"],
                 how="anti",
             )
 
-        return df.remove(pl.col("language_message") == "Nolang")  # 2
+        return lf_mess.remove(pl.col("language_message") == "Nolang")  # 2.
     return (remove_nolang_messages,)
 
 
 @app.cell
-def _():
-    # TOADD: function to remove non english messages
-    return
+def _(pl):
+    def remove_non_english_mess(lf_mess: pl.LazyFrame) -> pl.LazyFrame:
+        """Keep only messages that are English or Latin"""
+        return lf_mess.filter(
+            (pl.col("language_message") == "English")
+            | (pl.col("language_message") == "Latin")
+        )
+    return (remove_non_english_mess,)
 
 
 @app.cell(hide_code=True)
@@ -317,10 +368,227 @@ def _(mo):
     return
 
 
+@app.cell
+def _(stopwords):
+    # get stopwords list for nltk
+    def get_stopwords_pattern() -> str:
+        """
+        Returns regex pattern of nltk's english stopwords.
+
+        To customize:
+        - Add or remove words from `STOP_WORDS` with a dict
+        - To exclude words, replace '= set()' by a dict like so:
+            REMOVE_FROM_STOPWORDS = {"i", "who",...}
+        """
+        STOP_WORDS = set(stopwords.words("english"))
+
+        REMOVE_FROM_STOPWORDS = set()
+        ADD_TO_STOPWORDS = set()
+        STOP_WORDS.update(ADD_TO_STOPWORDS)  # add words
+        STOP_WORDS.difference_update(REMOVE_FROM_STOPWORDS)  # remove words
+
+        stop_pattern = "|".join(f"\\b{word}\\b" for word in STOP_WORDS)
+
+        return stop_pattern
+    return (get_stopwords_pattern,)
+
+
+@app.cell
+def clean_messages(pl):
+    def clean_and_tokenize(
+        lf_conv: pl.LazyFrame, columns: str | list[str], stop_pattern: str
+    ) -> pl.LazyFrame:
+        """Clean and tokenize the aggregated messages"""
+
+        if isinstance(columns, str):  # single string to list for consistency
+            columns = [columns]
+
+        return (
+            lf_conv.with_columns(
+                pl.col(columns)
+                .str.to_lowercase()
+                .str.replace_all(r"https?://\S+|www\.\S+", "")  # remove URLs
+                .str.replace_all(r"\S+@\S+", "")  # remove emails
+                .str.replace_all(r"[[:punct:]]", "")  # remove punctuation
+                .str.replace_all(stop_pattern, "")  # remove stop words
+                .str.replace_all(r"\d+", "")  # remove numbers
+                .str.replace_all(
+                    r"[^\x00-\x7F\x80-\xFF\u0100-\u017F\u0180-\u024F\u1E00-\u1EFF]",
+                    "",
+                )  # remove non latin letters (breakdown below)
+                .str.replace_all(r"\s+", " ")  # many whitespaces to a single one
+                .str.strip_chars()
+                .str.split(" ")  # tokenize
+                .list.eval(
+                    pl.element()
+                    .filter(pl.element() != "")
+                    .filter(pl.element().str.len_chars() > 1)
+                )  # remove empty tokens and single characters tokens
+            )
+            .drop_nulls(columns)  # remove rows with empty messages
+            .rename({col: f"{col}_tokens" for col in columns})
+        )
+
+
+    # [^\x00-\x7F\x80-\xFF\u0100-\u017F\u0180-\u024F\u1E00-\u1EFF]
+    return (clean_and_tokenize,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    **[^\x00-\x7F\x80-\xFF\u0100-\u017F\u0180-\u024F\u1E00-\u1EFF]**
+
+    This pattern removes:
+    - Greek letters (α, β, γ)
+    - Cyrillic (а, б, в)
+    - Chinese/Japanese/Korean characters
+    - Arabic, Hebrew, Thai, etc.
+
+    While keeping:
+
+    - All basic Latin letters and extended Latin with diacritics
+    - Spaces, punctuation, numbers (they're in the ASCII range)
+
+    1. **\x00-\x7F** (0-127): Basic ASCII
+    Includes A-Z, a-z, digits, punctuation, spaces, control characters
+
+    2. **\x80-\xFF** (128-255): Latin-1 Supplement
+    Includes: é, ñ, ü, ç, à, ô, etc.
+    Common accented characters in Western European languages
+
+    3. **\u0100-\u017F**: Latin Extended-A
+    Includes: ā, ē, ī, ő, ű, ł, ń, ś, etc.
+    Used in Central/Eastern European languages (Polish, Czech, etc.)
+
+    4. **\u0180-\u024F**: Latin Extended-B
+    Includes: ƒ, ǎ, ǐ, ǒ, ǔ, Ș, Ț, etc.
+    Less common Latin characters, some African languages
+
+    5. **\u1E00-\u1EFF**: Latin Extended Additional
+    Includes: Ṁ, ṁ, Ẁ, ẁ, Ỳ, ỳ, Vietnamese characters, etc.
+    Specialized diacritics and Vietnamese
+    """)
+    return
+
+
+@app.cell
+def fast_lemmatize(lemmatize, pl):
+    def _fast_lemmatize(
+        lf_conv: pl.LazyFrame, token_vars: str | list[str]
+    ) -> pl.LazyFrame:
+        """
+        lemmatize the tokens
+        - use dict to maps each unique tokens to lemmatizer equivalent
+        - lemmatize all tokens at once with polars list.eval. Super fast
+        """
+
+        if isinstance(token_vars, str):  # convert to list[str] for consistency
+            token_vars = [token_vars]
+
+        unique_tokens = (
+            lf_conv.select(pl.col(token_vars).explode().unique())
+            .drop_nulls()
+            .collect()
+            .to_series()
+            .to_list()
+        )
+
+        lemma_dict = {
+            token: lemmatize(token, lang="en") for token in unique_tokens
+        }
+        vocab = list(lemma_dict.values())
+
+        return lf_conv.with_columns(
+            pl.col(token_vars).list.eval(
+                pl.element().replace_strict(lemma_dict, default=pl.element())
+            )
+        ), unique_tokens
+    return
+
+
+@app.cell
+def _(lemmatize, pl):
+    def get_lemma_dict_and_vocab(
+        lf_conv: pl.LazyFrame, token_vars: str | list[str]
+    ) -> tuple[dict, list]:
+        """
+        lemmatize the tokens
+        - use dict to maps each unique tokens to lemmatizer equivalent
+        - lemmatize all tokens at once with polars list.eval(). Super fast
+        """
+
+        if isinstance(token_vars, str):  # convert to list[str] for consistency
+            token_vars = [token_vars]
+
+        unique_tokens = (
+            lf_conv.select(token_vars)
+            .explode(token_vars)
+            .unique(token_vars)
+            .drop_nulls(token_vars)
+            .collect()
+            .to_series()
+            .to_list()
+        )
+
+        lemma_dict = {
+            token: lemmatize(token, lang="en") for token in unique_tokens
+        }
+        vocab = list(lemma_dict.keys())  # keys are unique, values arn't
+
+        return lemma_dict, vocab
+
+
+    def fast_lemmatize(
+        lf_conv: pl.lazyframe, token_vars: str | list[str], lemma_dict: dict
+    ) -> pl.lazyframe:
+        """lemmatize the tokens using a dictionnary and list.eval(). Super fast"""
+
+        if isinstance(token_vars, str):  # convert str to list[str] for consistency
+            token_vars = [token_vars]
+
+        return lf_conv.with_columns(
+            pl.col(token_vars).list.eval(
+                pl.element().replace_strict(lemma_dict, default=pl.element())
+            )
+        )
+    return fast_lemmatize, get_lemma_dict_and_vocab
+
+
+@app.cell
+def _(clean_and_tokenize, fast_lemmatize, get_lemma_dict_and_vocab, pl):
+    # Wrapped the functions into one to reduce intermediate lf overhead and for ease of use with the columns to process
+    def process_message_tokens(
+        lf_conv_init: pl.LazyFrame,
+        mess_cols: str | list[str],
+        stop_pattern: str,
+    ) -> tuple[pl.LazyFrame, list]:
+        """
+        from init to final form of 'lf_conv', modifies the messages content only:
+        - clean the messages content and tokenize
+        - get a list of the unique tokens
+        - lemmatize the tokens
+        """
+
+        if isinstance(mess_cols, str):  # convert to list[str] for consistency
+            mess_cols = [mess_cols]
+
+        lf_conv_clean = clean_and_tokenize(lf_conv_init, mess_cols, stop_pattern)
+
+        # functions below works with tokenize version of the input cols, quick update to the var names
+        token_cols = [f"{col}_tokens" for col in mess_cols]
+
+        lemma_dict, vocab = get_lemma_dict_and_vocab(lf_conv_clean, token_cols)
+        lf_conv_lema = fast_lemmatize(lf_conv_clean, token_cols, lemma_dict)
+
+        return lf_conv_lema, vocab
+    return (process_message_tokens,)
+
+
 @app.cell(column=2, hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Data Exploration
+    ## Data visualization
 
     Conversations are a set of messages between the user and the assistant (AI).
     What are baasic elements about the conversations and messages ?
@@ -335,69 +603,23 @@ def _(mo):
 
 @app.cell
 def _():
-    import altair as alt
-    return (alt,)
-
-
-@app.cell
-def _():
     import matplotlib.pyplot as plt
     import seaborn as sns
-    return (plt,)
+    from wordcloud import WordCloud
+    return WordCloud, plt, sns
 
 
 @app.cell
-def _(alt, df_conv_lvl, mo):
-    df_plots = df_conv_lvl.head(500).collect()  # 500 sample
-
-    plot_nbr_turns = (
-        alt.Chart(df_plots)
-        .mark_bar()
-        .encode(x=alt.X("turn:N", labelAngle=0), y=alt.Y("count()", title=""))
-        .properties(title="Count of turns")
-    )
-
-
-    mo.ui.altair_chart(plot_nbr_turns)
-
-    """ seaborn version of the plot
-    plt.figure(figsize=(10, 6))
-    sns.countplot(data=df_conv_lvl.collect(), x="turn")
-    plt.xticks(rotation=0)  # Keep x-axis labels horizontal
-    plt.title("Count of turns")
-    plt.ylabel("Count")
-    plt.xlabel("Turn")
-    plt.show()
-    """
-    return
-
-
-@app.cell
-def _(alt, df_mess_lvl, mo):
+def _(lf_mess, plt, sns):
     _test = (
-        df_mess_lvl.collect()
+        lf_mess.collect()
         .head(100)
         .group_by("conversation_hash")
         .len(name="nbr_mess_per_conv")
     )
 
-
-    nbr_mess_per_conv = (
-        alt.Chart(_test)
-        .mark_bar()
-        .encode(
-            x=alt.X("nbr_mess_per_conv:N", title="Number of messages"),
-            y=alt.Y("count()", title="Number of conversations"),
-        )
-        .properties(title="Number of conversations with n messages")
-    )
-
-    mo.ui.altair_chart(nbr_mess_per_conv)
-
-
-    """ seaborn version of the plot
     _test = (
-        df_mess_lvl.collect()
+        lf_mess.collect()
         .head(100)
         .group_by("conversation_hash")
         .len(name="nbr_mess_per_conv")
@@ -406,9 +628,9 @@ def _(alt, df_mess_lvl, mo):
     plt.figure(figsize=(10, 6))
     sns.countplot(
         data=_test,
-        x='nbr_mess_per_conv',
-        hue='nbr_mess_per_conv',
-        palette='colorblind'
+        x="nbr_mess_per_conv",
+        hue="nbr_mess_per_conv",
+        palette="colorblind",
     )
     plt.title("Number of conversations with n messages")
     plt.xlabel("Number of messages")
@@ -416,13 +638,82 @@ def _(alt, df_mess_lvl, mo):
     plt.xticks(rotation=45)  # Rotate x-axis labels if needed
     plt.tight_layout()
     plt.show()
-    """
+
+    # majority of conversations with 2 messages, 1 user prompt and 1 assistant response
     return
 
 
 @app.cell
-def _(alt, df_mess_lvl, mo):
-    _test = df_mess_lvl.collect().sample(100).group_by("role").len()
+def _(WordCloud, lf_conv, pl, plt):
+    _text = (
+        lf_conv.select(
+            pl.col("first_user_content_tokens").list.join(" ").str.join(" ")
+        )
+        .collect()
+        .item()
+    )
+
+
+    _wordcloud = WordCloud().generate(_text)
+
+    plt.figure()
+    plt.imshow(_wordcloud, interpolation="bilinear")
+    plt.axis("off")
+    plt.show()
+    return
+
+
+@app.cell
+def _(np, pl, plt, sns, tfidf_matrix, vectorizer):
+    feature_names = vectorizer.get_feature_names_out()
+
+    mean_tfidf = np.asarray(tfidf_matrix.mean(axis=0)).flatten()
+
+    # Create a Polars DataFrame
+    _tfidfviz = pl.DataFrame({"word": feature_names, "tfidf_score": mean_tfidf})
+
+    # Get top N words
+    top_n = 20
+    top_words = _tfidfviz.sort("tfidf_score", descending=True).head(top_n)
+
+    # Convert to pandas for seaborn (seaborn works better with pandas)
+    # top_words_pd = top_words.to_pandas()
+
+    # Create the barplot
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=top_words, y="tfidf_score", x="word", hue="word")
+
+    plt.title(f"Top {top_n} Words by TF-IDF Score", fontsize=16, fontweight="bold")
+    plt.xlabel("Mean TF-IDF Score", fontsize=12)
+    plt.ylabel("Words", fontsize=12)
+    plt.tight_layout()
+    plt.show()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    We can see different kind of words:
+    - action verbs that tell the assistant what to do: write, use, make, give, create
+    - topic related words: file, code, script
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ---
+    """)
+    return
+
+
+@app.cell
+def _(lf_mess, mo):
+    import altair as alt
+
+    _test = lf_mess.collect().group_by("role").len()
 
     ratio_role = (
         alt.Chart(_test)
@@ -454,28 +745,7 @@ def _(alt, df_mess_lvl, mo):
         text="%",
     ).encode(color=alt.value("black"))
 
-    mo.ui.altair_chart(ratio_role + _left_label + _right_label + _percent_label)
-    return
-
-
-@app.cell
-def _(clean_messages, df_conv_lvl, pl, plt, stop_pattern):
-    from wordcloud import WordCloud
-
-    _df_wc = df_conv_lvl.head(500).collect().pipe(clean_messages, stop_pattern)
-
-
-    text = _df_wc.select(
-        pl.col("cleaned_content").list.join(" ").str.join(" ")
-    ).item()
-
-
-    wordcloud = WordCloud().generate(text)
-
-    plt.figure()
-    plt.imshow(wordcloud, interpolation="bilinear")
-    plt.axis("off")
-    plt.show()
+    mo.ui.altair_chart(ratio_role + _left_label + _right_label)
     return
 
 
@@ -483,20 +753,6 @@ def _(clean_messages, df_conv_lvl, pl, plt, stop_pattern):
 def _(mo):
     mo.md(r"""
     # Test zone
-    """)
-    return
-
-
-@app.cell
-def _(df):
-    dff = df.head(30)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ---
     """)
     return
 
@@ -523,13 +779,6 @@ def _():
     return
 
 
-@app.cell
-def _():
-    # how many non english messages ?
-    # ~10% on file 0014
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -539,262 +788,21 @@ def _(mo):
 
 
 @app.cell
-def _():
-    import nltk
-
-    try:
-        nltk.data.find("corpora/stopwords")
-        from nltk.corpus import stopwords
-    except LookupError:
-        nltk.download("stopwords")
-
-    # corpus should be in "User/nltk_data/corpus"
-    return (stopwords,)
+def _(fast_lemmatize, lemmatize, lf_tokens, pl):
+    # great when testing with the first file (30k rows) (faster that the other appraoch), but likely worse on the whole data
+    # Why ?
+    # We call 'lemmatize', for each token even duplicates so likelly called millions of times.
+    # map_elements() uses a UDF so polars can't optimze the content of the function in the query, no parallzlization for example
 
 
-@app.cell
-def _(STOP_WORDS):
-    STOP_WORDS
-    return
-
-
-@app.cell
-def _(stopwords):
-    STOP_WORDS = set(stopwords.words("english"))
-
-    remove_from_stopwords = {"i", "who", 'how', 'you'}  # fmt: skip
-    STOP_WORDS.difference_update(remove_from_stopwords)
-
-
-    stop_pattern = "|".join(f"\\b{word}\\b" for word in STOP_WORDS)
-    return STOP_WORDS, stop_pattern
-
-
-@app.cell
-def _(df_conv_lvl):
-    dft = df_conv_lvl.head(100).collect()
-    return
-
-
-@app.cell
-def _():
-    # removed at least 1 message composed with stop words only ('how are you?')
-    return
-
-
-@app.cell
-def _(pl):
-    def clean_messages(lf: pl.LazyFrame, stop_pattern: str) -> pl.LazyFrame:
-        return lf.with_columns(
-            pl.col("first_user_content")
-            .str.to_lowercase()
-            .str.replace_all(r"https?://\S+|www\.\S+", "")  # remove URLs
-            .str.replace_all(r"\S+@\S+", "")  # remove emails
-            .str.replace_all(r"[[:punct:]]", "")  # remove punctuation
-            .str.replace_all(stop_pattern, "")  # remove stop words
-            .str.replace_all(r"\s+", " ")  # many whitespaces to a single one
-            .str.strip_chars()
-            .str.split(" ")  # tokenize
-            .alias("cleaned_content")
-        )
-    return (clean_messages,)
-
-
-@app.cell
-def _(clean_messages, df_conv_lvl, stop_pattern):
-    _df_tokens = clean_messages(df_conv_lvl, stop_pattern)
-    return
-
-
-@app.cell
-def _(df_conv_lvl, pl, stop_pattern):
-    def clean_messages_vars(
-        lf: pl.LazyFrame, columns: str | list[str], stop_pattern: str
-    ) -> pl.LazyFrame:
-        """
-        Clean text columns and tokenize
-        """
-        if isinstance(columns, str):
-            columns = [columns]
-
-        cleaned_cols = [
-            pl.col(col)
-            .str.to_lowercase()
-            .str.replace_all(r"https?://\S+|www\.\S+", "")  # remove URLs
-            .str.replace_all(r"\S+@\S+", "")  # remove emails
-            .str.replace_all(r"[[:punct:]]", "")  # remove punctuation
-            .str.replace_all(stop_pattern, "")  # remove stop words
-            .str.replace_all(r"\s+", " ")  # normalize whitespace
-            .str.strip_chars()
-            .str.split(" ")  # tokenize
-            for col in columns
-        ]
-
-        return lf.with_columns(cleaned_cols).rename(
-            {col: f"{col}_tokens" for col in columns}
-        )
-
-
-    vars_to_tokenize = ["first_user_content"]
-    df_tokens = clean_messages_vars(df_conv_lvl, vars_to_tokenize, stop_pattern)
-    return (df_tokens,)
-
-
-@app.cell
-def _(df_conv_lvl, pl, stop_pattern):
-    df_conv_lvl.with_columns(
-        pl.col(["first_user_content", "all_user_content"])
-        .str.to_lowercase()
-        .str.replace_all(r"https?://\S+|www\.\S+", "")  # remove URLs
-        .str.replace_all(r"\S+@\S+", "")  # remove emails
-        .str.replace_all(r"[[:punct:]]", "")  # remove punctuation
-        .str.replace_all(stop_pattern, "")  # remove stop words
-        .str.replace_all(r"\s+", " ")  # many whitespaces to a single one
-        .str.strip_chars()
-        .str.split(" ")  # tokenize
-    ).rename({"first_user_content": "first_user_content_tokens"})
-    return
-
-
-@app.cell
-def _():
-    import spacy
-    from spacy.tokens import Doc
-
-    nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
-    # nlp = spacy.load("en_core_web_sm", disable=["parser", "ner", "morphologizer"])
-    return (nlp,)
-
-
-@app.cell
-def _(df_tokens):
-    df_test = (
-        df_tokens.head(1000).collect().lazy()
-    )  # keep the same head content, otherwise randomly pulls
-    return (df_test,)
-
-
-@app.cell
-def _(df, pl):
-    empty_strings = df.filter(pl.col("text_column") == "")
-    return
-
-
-@app.cell
-def _(df_tokens, pl):
-    df_tokens.collect().with_columns(
-        pl.col("first_user_content_tokens")
-        .list.eval(pl.element().filter(pl.element() == ""))
-        .list.len()
-        .alias("empty_count")
-    )
-    return
-
-
-@app.cell
-def _(df_conv_lvl):
-    df_conv_lvl.select("conversation_id", "first_user_content").collect()
-    return
-
-
-@app.cell
-def _(df_test, nlp, pl):
-    def lemmatize_tokens_batch(token_lists: list[list[str]]) -> list[list[str]]:
-        """
-        Lemmatize batches of token lists using spaCy's pipe.
-        """
-
-        texts = [" ".join(tokens) for tokens in token_lists]
-
-        # docs = [Doc(nlp.vocab, words=token_list) for token_list in texts]
-
-        docs = nlp.pipe(texts)
-
-        # Extract lemmas
-        lemmatized = [[token.lemma_ for token in doc] for doc in docs]
-
-        return lemmatized
-
-
-    # Apply with map_batches for parallel processing
-    df_result = (
-        df_test.with_columns(
-            pl.col("first_user_content_tokens")
-            .map_batches(
-                lambda series: pl.Series(
-                    [lemmatize_tokens_batch(series.to_list())][0]
-                ),
-                return_dtype=pl.List(pl.String),
-            )
-            .alias("lemmatized_tokens")
-        )
-    ).collect(engine="streaming")
-    return (df_result,)
-
-
-@app.cell
-def _(df_result):
-    df_result["conversation_id", "first_user_content_tokens", "lemmatized_tokens"]
-    return
-
-
-@app.cell
-def _(df_tokens, pl):
-    df_tokens.filter(
-        pl.col("conversation_id")
-        == "a5aae6199e4cbb97f020337bce9dbf66_ff02a68ec3eb845852b0d02da7403246f4ae93b9a12a0cde19304bd21337b358"
-    )
-    return
-
-
-@app.cell
-def _(df_test, pl):
-    df_test.with_columns(pl.col("first_user_content_tokens")).collect_schema()
-    return
-
-
-@app.cell
-def _(df_test, pl):
-    # working nicely
-    from simplemma import lemmatize
-
-
-    def fast_lemmatize(token_lists: list[str]) -> list[str]:
+    def _fast_lemmatize(token_lists: list[str]) -> list[str]:
         """Ultra-fast lemmatization without NLP pipeline."""
         return [lemmatize(token, lang="en") for token in token_lists]
 
 
-    _df_result = df_test.with_columns(
+    _df_result = lf_tokens.with_columns(
         pl.col("first_user_content_tokens")
         .map_elements(fast_lemmatize, return_dtype=pl.List(pl.String))
-        .alias("lemmatized_tokens")
-    ).collect(engine="streaming")
-
-    _df_result["first_user_content_tokens", "lemmatized_tokens"]
-    return
-
-
-@app.cell
-def _(df_test, pl, simplemma):
-    def _lemmatize_tokens_batch(token_lists: list[list[str]]) -> list[list[str]]:
-        """
-        Lemmatize batches of token lists using simplemma.
-        """
-        lemmatized = [
-            [simplemma.lemmatize(token, lang="en") for token in token_lists]
-            for token_list in token_lists
-        ]
-        return lemmatized
-
-
-    # Apply with map_batches for parallel processing
-    _df_result = df_test.with_columns(
-        pl.col("first_user_content_tokens")
-        .map_batches(
-            lambda series: pl.Series(
-                [_lemmatize_tokens_batch(series.to_list())][0]
-            )
-        )
         .alias("lemmatized_tokens")
     ).collect(engine="streaming")
     return
@@ -805,6 +813,85 @@ def _(mo):
     mo.md(r"""
     ---
     """)
+    return
+
+
+@app.cell
+def _(df_conv, pl, vocab):
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    vectorizer = TfidfVectorizer(
+        tokenizer=lambda x: x,  # dummy tokenizer
+        preprocessor=None,
+        lowercase=False,
+        token_pattern=None,
+        vocabulary=vocab,
+        max_features=None,
+        min_df=1,
+        max_df=1.0,
+    )
+
+    tfidf_matrix = vectorizer.fit_transform(
+        df_conv.select(pl.col("first_user_content_tokens")).to_series().to_list()
+    )
+    return tfidf_matrix, vectorizer
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ---
+    """)
+    return
+
+
+@app.cell
+def _(lemmatize, pl):
+    # Interesting discovery: can attach metadata to lazyframes (here _vocab)
+    # It leavs in memory and is only attached to this version of the lazy frame, if i modify it it doesn't persist
+    def _fast_lemmatize(
+        lf_conv: pl.LazyFrame, token_vars: str | list[str]
+    ) -> pl.LazyFrame:
+        """
+        lemmatize the tokens
+        - use dict to maps each unique tokens to lemmatizer equivalent
+        - lemmatize all tokens at once with polars list.eval. Super fast
+        """
+        if isinstance(token_vars, str):
+            token_vars = [token_vars]
+
+        unique_tokens = (
+            lf_conv.select(pl.col(token_vars).explode().unique().drop_nulls())
+            .collect()
+            .to_series()
+            .to_list()
+        )
+
+        lemma_dict = {
+            token: lemmatize(token, lang="en") for token in unique_tokens
+        }
+
+        result = lf_conv.with_columns(
+            pl.col(token_vars).list.eval(
+                pl.element().replace_strict(lemma_dict, default=pl.element())
+            )
+        )
+
+        # Store unique tokens as an attribute on the LazyFrame object
+        result._vocab = list(lemma_dict.values())
+
+        return result
+
+
+    # Usage
+    # _lf_conv_lvl = (
+    #    lf_conv_init
+    #    .pipe(clean_messages, "first_user_content", stop_pattern)
+    #    .pipe(_fast_lemmatize, "first_user_content_tokens")
+    # )
+
+    # Retrieve the unique tokens later
+    # _lf_conv_lvl._vocab
     return
 
 

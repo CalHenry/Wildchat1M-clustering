@@ -1,0 +1,191 @@
+{
+  "version": "1",
+  "metadata": {
+    "marimo_version": "0.17.8"
+  },
+  "cells": [
+    {
+      "id": "YKpV",
+      "code_hash": "ca49d20c3d4e40fab5515da5cbdba3c1",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h1 id=\"get-the-list-of-the-unique-words-in-the-texts-polars-vs-duckdb\">Get the list of the unique words in the texts - Polars vs Duckdb</h1>\n<span class=\"paragraph\">This notebook is a quick benchmark between 4 approaches (3 Polars and 1 DuckDB).<br />\nThe first benchmark draws the data from a lazyframe.<br />\nThe second benchmark draws the from a parquet file on disk. </span>\n<span class=\"paragraph\">The data we are insterested in is in a single column containing list[str] values but the dataset has 11 columns.<br />\nThe texts are tokenized and we want to get a list of all the unique tokens (necessary in the main workflow for efficient lemmatization). Tokens can be duplicated inside a list and across the lists.\nTo get the unique list, we need to explode the lists and then extract all unique values from the pool of all the tokens.<br />\nWe have a <strong>LOT</strong> of tokens (1M+ tokens).  </span>\n<span class=\"paragraph\"><strong>Technical challenges:</strong><br />\nExploding the lists creates one row per token, resulting in a <strong>massive</strong> intermediate dataset.\nLoading the fully exploded dataset into memory was crashing my Python. Therefore I seek solutions and here I am with this benchamark.<br />\nWe use lazy evaluation with streaming execution to make this possible.</span>\n<span class=\"paragraph\">How streaming works:</span>\n<span class=\"paragraph\">Polars processes the data in chunks, maintaining a smaller memory footprint. When a chunk is done, it's memory is freed. However, the specific execution strategy varies:</span>\n<span class=\"paragraph\"><strong>Code 1</strong>: Attempts to explode and deduplicate in the lazy query plan before collecting<br />\n<strong>Code 2</strong>: Collects the list column first, then explodes and deduplicates in memory<br />\n<strong>Code 3</strong>: Explicitly processes in batches using iter_slices(), manually aggregating unique tokens  </span>\n<span class=\"paragraph\">In the big picture, DuckDB uses the same concepts with a few specificities related to SQL. But it's comparable.</span>\n<span class=\"paragraph\">Both engines optimize by processing data in batches: read batch \u2192 explode \u2192 deduplicate \u2192 move to next batch. This allows handling datasets larger than available RAM.\nThe resulting list contains <strong>824,836</strong> unique tokens.</span>\n<span class=\"paragraph\">A second similar benchmark is avaible, this one reads from the same file but on disk as a parquet file instead of a lazyframe in memory (duckdb can't read from a lazyframe).</span>\n<span class=\"paragraph\">The results are quite interesting and we can appreciate the possible optimization of the code.</span>\n<span class=\"paragraph\">Below more details on why I ended up with the codes in the benchmark: </span>\n<ul>\n<li>I only have 16GB on my macbook</li>\n<li><strong>explode()</strong> is the bottleneck of this case. It creates so many rows that leads to OOM.</li>\n<li><strong>collect()</strong> is the action crashes python and we have to collect to create a list of unique values.</li>\n<li>The subset of variables we are in (.select('a_var')), doesn't mean that the other variables are not part of the computations. Look at where the select() paranthesis closes in the final code</li>\n<li>Exploding a var in the dataset and returning the dataset create a duplicates of the values of the non exploded vars for all the new rows, make the exploded data extremely large.  </li>\n<li><strong>collect(engine='streaming')</strong> is mandatory</li>\n<li>the order of the operation is really important for the code to work. <strong>explode()</strong> and <strong>collect()</strong> at the wrong place and it's OOM crashing python. The right flavor of the function is also key. In polars using the right submodule (list, str, struct...) tells what input/ output we have</li>\n<li>Maximizeing lazy evaluation allow polars to optimize it's query plan which can be the difference between OOM and a working snippet</li>\n</ul></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Hbol",
+      "code_hash": "f7ae4b2ad65c9fe6c58d97274eba1c27",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "MJUe",
+      "code_hash": "d4f483eb964bda18011cdd754a39d651",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "mTHP",
+      "code_hash": "f977a85ef7f4a04b16786f63a79c5df4",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\">Run the huge cell below to prepare the data for the benchmark.<br />\nIt uses the functions on the right col and reproduces the workflow of the main work.</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "vblA",
+      "code_hash": "d65f03d09b35ce8e02b6a6e3c311aa6a",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Xref",
+      "code_hash": "25c61125e79e6b13c9e238d2f3721e0a",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"functions\">Functions</h2></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "SFPL",
+      "code_hash": "c5e3c19ec0860d46c214203c71f7d373",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "BYtC",
+      "code_hash": "1af3bd901b58b72afa460246441f1123",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"benchmark\">Benchmark</h2></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "RGSE",
+      "code_hash": "db9b31a740b382945dee998bdc353c88",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": [
+        {
+          "type": "stream",
+          "name": "stdout",
+          "text": "==================================================\nBENCHMARK RESULTS\n==================================================\n\nCode 1 (explode in lazy):\n  Time: 16.48s\n  Peak Memory: 53.1 MB\n  Result size: 824836\n\nCode 2 (collect then explode):\n  Time: 19.29s\n  Peak Memory: 50.6 MB\n  Result size: 824836\n\nCode 3 (batched processing):\n  Time: 17.48s\n  Peak Memory: 50.6 MB\n  Result size: 824836\n\n==================================================\nSUMMARY\n==================================================\n\u26a1 Fastest: Code 1 (16.48s)\n\ud83d\udcbe Lowest Memory: Code 3 (50.6 MB)\n",
+          "mimetype": "text/plain"
+        }
+      ]
+    },
+    {
+      "id": "bNNw",
+      "code_hash": "328f74eb692bd655de9773ebee4638f7",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\">Benchmark took 56sec on my machine.<br />\nBatch processing while being comparable in speed is worse for the memory pressure.<br />\nCode 1 is equivalent to code 2 in memory but is ~2 sec faster. It's the winner.  </span>\n<h4 id=\"run-1\">RUN 1</h4>\n<span class=\"paragraph\">==================================================\nBENCHMARK RESULTS\n==================================================</span>\n<span class=\"paragraph\">Code 1 (explode in lazy):\n  Time: 17.50s\n  Peak Memory: 50.6 MB\n  Result size: 824836</span>\n<span class=\"paragraph\">Code 2 (collect then explode):\n  Time: 19.09s\n  Peak Memory: 50.6 MB\n  Result size: 824836</span>\n<span class=\"paragraph\">Code 3 (batched processing):\n  Time: 19.11s\n  Peak Memory: 96.0 MB\n  Result size: 824836</span>\n<span class=\"paragraph\">==================================================\nSUMMARY\n==================================================<br />\n\u26a1 Fastest: Code 1 (17.50s)<br />\n\ud83d\udcbe Lowest Memory: Code 2 (50.6 MB)  </span>\n<h4 id=\"run-2\">RUN 2</h4>\n<span class=\"paragraph\">==================================================\nBENCHMARK RESULTS\n==================================================</span>\n<span class=\"paragraph\">Code 1 (explode in lazy):\n  Time: 17.31s\n  Peak Memory: 54.8 MB\n  Result size: 824836</span>\n<span class=\"paragraph\">Code 2 (collect then explode):\n  Time: 19.38s\n  Peak Memory: 50.6 MB\n  Result size: 824836</span>\n<span class=\"paragraph\">Code 3 (batched processing):\n  Time: 19.27s\n  Peak Memory: 96.1 MB\n  Result size: 824836</span>\n<span class=\"paragraph\">==================================================\nSUMMARY\n==================================================<br />\n\u26a1 Fastest: Code 1 (17.31s)<br />\n\ud83d\udcbe Lowest Memory: Code 2 (50.6 MB)  </span>\n<h4 id=\"run-3-no-batch\">RUN 3 (no batch)</h4>\n<span class=\"paragraph\">==================================================\nBENCHMARK RESULTS\n==================================================</span>\n<span class=\"paragraph\">Code 1 (explode in lazy):\n  Time: 17.29s\n  Peak Memory: 50.6 MB\n  Result size: 824836</span>\n<span class=\"paragraph\">Code 2 (collect then explode):\n  Time: 19.68s\n  Peak Memory: 50.8 MB\n  Result size: 824836</span>\n<span class=\"paragraph\">==================================================\nSUMMARY\n==================================================<br />\n\u26a1 Fastest: Code 1 (17.29s)<br />\n\ud83d\udcbe Lowest Memory: Code 1 (50.6 MB)  </span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "vuIC",
+      "code_hash": "de63aac3678e826d381499d5d4c88b4c",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\">def code3():\n    result = set()\n    for batch in (\n        lf_test.select(\"first_user_content_tokens\")\n        .collect(engine=\"streaming\")\n        .iter_slices(100000)\n    ):\n        tokens = (\n            batch[\"first_user_content_tokens\"]\n            .list.explode()\n            .unique()\n            .drop_nulls()\n        )\n        result.update(tokens.to_list())\n    return list(result)</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "UCNb",
+      "code_hash": "30dc19353298d1343b544e3b14812023",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": [
+        {
+          "type": "stream",
+          "name": "stdout",
+          "text": "==================================================\nBENCHMARK RESULTS\n==================================================\n\nCode 1 (explode in lazy):\n  Time: 2.55s\n  Peak Memory: 50.6 MB\n  Result size: 824836\n\nCode 2 (collect then explode):\n  Time: 5.95s\n  Peak Memory: 50.6 MB\n  Result size: 824836\n\nCode 3 (batched processing):\n  Time: 2.38s\n  Peak Memory: 50.6 MB\n  Result size: 824836\n\nCode 4 (duckdb SQL):\n  Time: 3.14s\n  Peak Memory: 94.7 MB\n  Result size: 824836\n\n==================================================\nSUMMARY\n==================================================\n\u26a1 Fastest: Code 3 (2.38s)\n\ud83d\udcbe Lowest Memory: Code 1 (50.6 MB)\n",
+          "mimetype": "text/plain"
+        }
+      ]
+    },
+    {
+      "id": "YIqY",
+      "code_hash": "c11d028068e226d8866f9eceb3a00a4c",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\">Bacthed processing is the looser.<br />\nCode 2 is the slowest but has the best memory load.<br />\nDuckdb is fast but the memory load is the highest by a lot.<br />\nCode 1 is the winner. It's the fastest and has the lowest memory foot print (same as Code2)</span>\n<span class=\"paragraph\">Polars win !</span></span>"
+          }
+        }
+      ],
+      "console": []
+    }
+  ]
+}

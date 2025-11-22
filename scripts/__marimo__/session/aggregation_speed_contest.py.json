@@ -1,0 +1,46 @@
+{
+  "version": "1",
+  "metadata": {
+    "marimo_version": "0.17.7"
+  },
+  "cells": [
+    {
+      "id": "MJUe",
+      "code_hash": "d8995d4a1b875da0628c06c0e1b8823d",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h1 id=\"speed-contest-for-aggregation-polars-vs-duckdb\">Speed contest for aggregation - Polars vs Duckdb</h1></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "bkHC",
+      "code_hash": "61d705df62c6349a101114d93d766e0d",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\"><strong>Results for a test with 100 runs on \"train-00000-of-00014.parquet\" (180.7mb)</strong></span>\n<span class=\"paragraph\"><em>(!todo run the test for the full data, here it's part 1/14 only)</em></span>\n<span class=\"paragraph\">Polars is faster by ~35% in this use case. Impressive results, so I will use the full polars pipeline.</span>\n<span class=\"paragraph\"><strong>Why ?</strong></span>\n<ul>\n<li>Polars only collect the data once</li>\n<li>It optimizes the full lazy pipeline</li>\n<li>Duckdb requires to collect twice, for the intermediate result and for the final result</li>\n<li>The duckdb pipeline can only optimize each step independently.</li>\n</ul>\n<span class=\"paragraph\">Interesting observations for this use case:</span>\n<ul>\n<li>The duration difference is negligeable (~300ms)</li>\n<li>Duckdb is faster for the aggregation part alone (by ~24% from my tests, which is impressive)</li>\n</ul>\n<span class=\"paragraph\">A full duckdb pipeline, thus in pure SQL, is probably faster</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Hbol",
+      "code_hash": "289a811a4137b7c64b058e330f33c0fc",
+      "outputs": [],
+      "console": []
+    },
+    {
+      "id": "vblA",
+      "code_hash": "09c6ee9af80e63d470875a5416c3e37e",
+      "outputs": [],
+      "console": []
+    }
+  ]
+}
