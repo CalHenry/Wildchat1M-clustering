@@ -10,9 +10,12 @@ def _():
     import duckdb
     import polars as pl
     import numpy as np
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
     import matplotlib.pyplot as plt
     import seaborn as sns
-    return mo, np, pl, plt, sns
+    return KMeans, TfidfVectorizer, mo, np, pl, plt, silhouette_score, sns
 
 
 @app.cell
@@ -43,9 +46,7 @@ def _(mo):
 
 
 @app.cell
-def _(df_conv, pl, vocab):
-    from sklearn.feature_extraction.text import TfidfVectorizer
-
+def _(TfidfVectorizer, df_conv, pl, vocab):
     vectorizer = TfidfVectorizer(
         tokenizer=lambda x: x,  # dummy tokenizer
         vocabulary=vocab,
@@ -105,12 +106,51 @@ def _(mo):
 
 
 @app.cell
-def _():
+def _(KMeans, tfidf_matrix):
+    # find number of clusters
+
+    inertia_values = []
+    k_range = range(1, 11)
+
+
+    for k in k_range:
+        kmeans = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42)
+        kmeans.fit(tfidf_matrix)
+        inertia_values.append(kmeans.inertia_)
+    return inertia_values, k_range
+
+
+@app.cell
+def _(inertia_values, k_range, plt):
+    plt.figure(figsize=(10, 7))
+    plt.plot(k_range, inertia_values, 'bo-')
+    plt.xlabel('Nombre de clusters (K)')
+    plt.ylabel('Inertie')
+    plt.title('Méthode du Coude pour le Choix de K')
+    plt.xticks(k_range)
+    plt.grid(True)
+    plt.show()
     return
 
 
 @app.cell
-def _():
+def _(KMeans, np, plt, silhouette_score, tfidf_matrix):
+    silhouette_values = []
+    for _k in range(2, 11): # Le score de silhouette n'est défini que pour K >= 2
+        _kmeans = KMeans(n_clusters=_k, init='k-means++', n_init=10, random_state=42)
+        labels = _kmeans.fit_predict(tfidf_matrix)
+        silhouette_values.append(silhouette_score(tfidf_matrix, labels))
+
+    # Tracer la courbe du score de silhouette
+    plt.figure(figsize=(10, 7))
+    plt.plot(range(2, 11), silhouette_values, 'ro-')
+    plt.xlabel('Nombre de clusters (K)')
+    plt.ylabel('Score de Silhouette Moyen')
+    plt.title('Score de Silhouette pour le Choix de K')
+    plt.xticks(range(2, 11))
+    plt.grid(True)
+    plt.show()
+    best_k_silhouette = np.argmax(silhouette_values) + 2 # +2 car on commence à k=2
     return
 
 
