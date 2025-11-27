@@ -12,7 +12,7 @@
 *.wal
 *.tmp/
 
-__marimo__/
+**/__marimo__/
 
 data/*/ 
 
