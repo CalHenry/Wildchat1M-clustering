@@ -30,28 +30,35 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    The goal of this notebooks is to cluster the conversations and it requires data manipulations.
+
+    The main workflow is in this first column, helper functions are in the second column to the right.
+
     ## Data preparation
+
+    Our data is spread in 14 parquet files, each row is a conversation. The data schema is optimized for storage not for analysis.
+
+
+    ### Computational challenge
+
+    The entire dataset represents ~15GB of uncompressed data (3GB in Parquet format), which would typically require 45-75GB of RAM using conventional in-memory approaches.
+    This notebook processes the data efficiently in a single pipeline using Polars and DuckDB. For details on how **modern query engines**, **lazy** evaluation, and **streaming execution** make this possible, see the README
 
     ### A word on the libraries used:
 
-    **Duckdb** is great and **Polars** is awsome.
+    **DuckDB** and **Polars** are both excellent choices for this type of work. While the project could be completed entirely in DuckDB with SQL queries, I prefer Polars's expressive syntax for complex, chained DataFrame transformations.
+    Both libraries feature lazy execution and are highly optimized. The workflow leverages their complementary strengths:
 
-    I could use Duckdb only and write SQL queries but I am more confortable with **Polars's** synthax for complex and chainned modifications to dataframes.
-    They both have lazy excecution and are very fast.
+    - **DuckDB** at the beginning for importing data or filtered subsets from raw files—simple queries can accomplish a lot
+    - **Polars** for complex manipulations in the core workflow
 
-    I can use:
-    - SQL at the begining, to import data or a filtered version from raw files. Simple queries can do a lot.
-    - Polars for the complex manipulations in the workflow.
-    - SQL and Duckdb for big aggregations and joins.
+    Key benefits of this hybrid approach:
+    - Extremely fast data reading (both libraries are excellent)
+    - Efficient data import with simple SQL queries
+    - SQL relations work similarly to Polars expressions, making translation seamless
+    - SQL views provide convenient intermediate representations
 
-    Benefits of using duckdb in my workflow:
-    - reading data is extremly fast (although polars is very fast as well)
-    - can import in a  super efficient way with just a simple SQL query
-    - SQL relations are similar to polars's expressions and can be very handy
-    - SQL views are also very handy
-
-
-    ➡️ Both libraries are interchangeable here and I can choose the one I prefer for each part of my work and keep a seamless workflow.
+    ➡️ Both libraries are interchangeable. I can choose the best tool for each task while maintaining a seamless workflow.
     """)
     return
 
@@ -71,9 +78,12 @@ def _(mo):
     1. We use duckdb for a SQL query
     2. We specify that we want to convert the query's result to Polars df.
     As soon as ```.pl(lazy=True)``` is written, the object is now a polars LazyFrame, to which i can apply polars code.
-    I used both libraries in the same sequence.
+    We use both libraries in the same sequence.
 
-    > I'll use the abbreviation '**lf**' for lazyframes to differentiate with dataframes
+    We don't actually read the entire dataset from the 14 files. Duckdb can use the parquet file metadata to discover the data's schema without reading it. It can already exclude the variables that we've specified. The same goes for the filter on 'language', duckdb will only discover the rows where language is english. This reduces massively the amount of data to process.
+    All of the optimization happens before the query is executed. Here we push it further by asking for a polars lazyframe as the output. We don't request a dataframe but a query plan that can be excecuted. This is why the cell runs in 30ms, we don't load the data, we are writing a query plan and let polars optimize it for us.
+
+    > We use the abbreviation '**lf**' for lazyframes to differentiate with dataframes 'df'
     """)
     return
 
@@ -102,49 +112,45 @@ def _(mo):
 
     - This dataset has 3 levels:
     1. **User** level: identified by **'hashed_ip'** (based on the user's IP address)
-    2. **Conversations** level: identified by **'conversation_hash'**. *Uniquely* identified by **'conversation_hash'** + **'hashed_ip'**. ('conversation_hash' is not a unique identifier. 2 identical conversations will have the hash regarless the user, messages inside the conv will always have unique id)
-    3. **Message** level: identified **'turn_identifier'**
+    2. **Conversations** level: identified by **'conversation_hash'**. *Uniquely* identified by **'conversation_hash'** + **'hashed_ip'**. ('conversation_hash' is not a unique identifier. 2 identical conversations will have the hash regardless the user)
+    3. **Message** level: identified **'turn_identifier'** (unique across a conversation, not across all the messages)
 
     1 user can have N conversations of N messages.
-    1 message belong to 1 conversation that belong to 1 user
+    1 message belongs to 1 conversation that belongs to 1 user
 
-    - Messages works in pairs: one **user** message, one **assistant** response. **turn_identifier** + **role** give the order of the messages. The **user** always comes before the **assistant**.
-    - **'conversations'** is a complex variable of **List[structs]**. Each element of the list is 1 message. The fields of the **struct** are the message's content and it's metadata. Some fields are specific to the user, others to the assistant (expected missing values).
+    - Messages works in pairs: one **user** message, one **assistant** response. **turn_identifier** + **role** give the order of the messages. The **user** always comes first.
+    - **'conversations'** is a complex variable of **List[structs]**. Each element of the list is 1 message. The fields of the **struct** are the message's content and metadata. Some fields are specific to the user, others to the assistant (expected missing values).
 
     ### Tidy: manipulation, variable selection
-
-    We want to be at the **conversation level**, but we don't want a complex schema of **List[structs]** inside a single variable like we have in the raw dataset (the list can be +100 elements for long conversations).
-    Logic:
+    We want to be at the **conversation level** for the analysis.
+    To do so we have to:
     - flatten the dataset to message level, each row is a unique message, n rows for the same conversation.
-    - aggregate back to conversation level by creating features around the messages. We keep metadata variables for the conversations and not the messages.
-    - Final tidy dataset at the conversation level with several variables for different aggregations of the  messages's content (see section for details).
+    - aggregate back to conversation level by creating features around the messages. We keep the metadata variables for the conversations and not the messages.
+    - Some filtering/ cleaning is easier to do at the message level. Having acces to both levels gives more flexibility
+    - Conversation level allow to use different level of context with different aggregations. For example features can be *'Only the first user message'*, *'Only user messages'* or *'full conversation'*.
 
 
     ### Order of the tasks:
 
     1. Import data, shortlist of variables, filter only English conversations
-    2. User level --> Message level (flatten the dataset)
+    2. Compact conversation level --> Message level (flatten the dataset)
     3. Unique ID for conversations
-    4. Message level --> Conversation level
+    4. Message level --> Conversation level (aggregation)
     """)
     return
 
 
 @app.cell
 def _(lf):
-    # Same variables names in the nested vars of 'conversation'. We have to rename them before unnesting
-    # We do it his way because we want to keep the names on the front vars and remove some nested vars bc their info is already in the front vars
+    # Same variables names in the nested var 'conversation' are also present in the dataset. We have to rename them before unnesting otherwise there are conflicts
+    # Front vars give the info at the conversation level and the nested ones give the info at the message level
+    # We rename the nested vars to make them obvious
 
     conflicting_cols = ["language", "country", "state", "hashed_ip", "header"]
 
-    struct_fields = (
-        lf.select("conversation")
-        .head(0)  # don't care about the data, only the var names
-        .explode("conversation")
-        .collect()  # need eager to extract the list
-        .to_series()
-        .struct.fields
-    )
+    struct_fields = [
+        field.name for field in lf.collect_schema()["conversation"].inner.fields
+    ]
 
     new_fields = [
         f"{field}_nested" if field in conflicting_cols else field
@@ -161,7 +167,9 @@ def _(lf, new_fields, pl, remove_nolang_messages, remove_non_english_mess):
     ).alias("conversation_id")
 
 
-    # Flatten the data (explode nested variables)
+    # Flatten the data (explode nested variables), 2 levels depth
+    # conversation contains many nested vars and a nested var inside the nested vars: list[struct[struct]]
+
     lf_mess_raw = (
         (
             lf.with_columns(["conversation_hash", "conversation"])
@@ -173,7 +181,9 @@ def _(lf, new_fields, pl, remove_nolang_messages, remove_non_english_mess):
                     new_fields
                 )  # var name conflict between original and nested vars
             )
-            .unnest("conversation", "header")  # unnest the struct (now flat)
+            .unnest(
+                "conversation", "header"
+            )  # unnest the struct cols (2nd layer, now flat lf)
             .drop(
                 "hashed_ip_nested",
                 "header_nested",
@@ -190,7 +200,7 @@ def _(lf, new_fields, pl, remove_nolang_messages, remove_non_english_mess):
         .with_columns(create_conversation_id)
     )
 
-    # Clean messages of lf_mess_lvl_raw)
+    # Clean messages of lf_mess_raw
     lf_mess = lf_mess_raw.pipe(remove_nolang_messages).pipe(
         remove_non_english_mess
     )
@@ -199,7 +209,8 @@ def _(lf, new_fields, pl, remove_nolang_messages, remove_non_english_mess):
 
 @app.cell
 def _(get_stopwords_pattern, lf_mess, pl, process_message_tokens):
-    # From the flat message dataset, we can aggregate to conversation level
+    # From the flat message dataset, we aggregate to conversation level
+    # (4 different aggregations = 4 new variables)
     lf_conv_init = lf_mess.group_by("conversation_id").agg(
         [
             # First user message content
@@ -232,15 +243,14 @@ def _(get_stopwords_pattern, lf_mess, pl, process_message_tokens):
         ]
     )
 
-    # We can now clean and tokenize the messages
-    # get stopwords from NLTK as regex string
-    stop_pattern = get_stopwords_pattern()
+    # We can now clean and tokenize the messages:
+    stop_pattern = get_stopwords_pattern()  # from NLTK as a regex string
 
     # Clean aggregated messages of lf_conv_lvl_init
     lf_conv, vocab = process_message_tokens(
         lf_conv_init, "first_user_content", stop_pattern
     )
-    return (lf_conv,)
+    return lf_conv, vocab
 
 
 @app.cell(hide_code=True)
@@ -248,16 +258,13 @@ def _(mo):
     mo.md(rf"""
     Takeway:
 
-    3 levels in the data:
-    - User (top level, raw data)
-    - Conversation (user can have [1:n] conversations)
-    - Message
+    Most conversations are length 2 (1 user prompt, 1 assistant response). Longer conversations go up to 22 messages and the second most common number of turns is 6.
 
-    Most conversations are lenght 2 (1 user prompt, 1 assistant response). If the conversation is longer, it's most common to have a 6 turns conversations.
+    *Summary statistics and visualization are aviable in the exploration notebook 'explo_nb.py'*.
 
-    We focus on the english conversations and english messages.
-    Some cleanings had to be done at the message level, but most of them are done at the conversation because it's faster.
-    We designed some functions (lemmatization) and choose some libraries over others to have better performances (**simplemma** over **spacy** <-> speed over quality)
+    We focus on the English conversations and english messages.
+    We try to do as many operations as possible at the conversation level to improve simplicity and speed.
+    We created some functions (lemmatization) and choose some libraries over others to have better performances (**simplemma** over **spacy** <-> speed over quality)
     """)
     return
 
@@ -271,20 +278,21 @@ def _(mo):
 
 
 @app.cell
-def _(tokens):
+def _(vocab):
     # save vocab to disk
 
-    with open("data/processed/vocab.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(tokens))
-    print("✅ Saved vocab to data/processed/vocab.txt")
+    with open("data/processed/vocabtimmeingtest.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(vocab))
+    print("✅ Saved vocab to: data/processed/vocab.txt")
     return
 
 
 @app.cell
 def _(lf_conv):
-    # save to parquet
-    lf_conv.sink_parquet("data/clean/df_conv.parquet")
-    print("✅ Saved to to data/clean/df_conv.parquet")
+    # save lf_conv to parquet
+    # ! memory intensive excecution, it's here that the data passes trough the RAM
+    lf_conv.sink_parquet("data/clean/df_conv_timingtest.parquet")
+    print("✅ Saved lf_conv to: data/clean/df_conv.parquet")
     return
 
 
@@ -294,29 +302,56 @@ def _():
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Takeway on the workflow
+
+    - We went full polars except the import part at the begining with duckdb
+    - We kept a full lazy workflow, only declaring lazyframes
+    - We collected data once during the pipeline: to build the vocab of the document
+    - We never collected the dataset we were building
+    - The code actually processes the data when we save the last lazy frame (lf_conv) to parquet
+    - Polars can see the full query plan, from the moment duckdb returns a LazyFrame to the last step that creates lf_conv. It can optimize it, don't materialize the intermediate lazyframe defined (like lf_mess) for maximum performances
+    - We took full advantages of the query engine, lazy excecution and streaming engine
+    - Most of the code executes in milliseconds: Lazyframes are just query plans and use basically no RAM. The parts of the code that take time are when data is loaded in the RAM, for the **stopwords**, to build the **vocab**, to save the data to a parquet file.
+    - The entire notebook executes in **1m32** (1m06 for the **sink_parquet()** line) *if the stopwords are already downloaded on disk from nltk (this step takes less than a minute)*
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ```shell
+    time uv run scripts/nb_prep_clean.py
+
+    ✅ Saved vocab to: data/processed/vocab.txt
+    ✅ Saved lf_conv to: data/clean/df_conv.parquet
+    uv run scripts/nb_prep_clean.py  168.89s user 52.17s system 241% cpu 1:31.48 total
+    ```
+    """)
+    return
+
+
 @app.cell(column=1, hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Data cleaning
 
-    Now that we have prepare the dataset by moving variables around, we can dig into the content and prepare the messages.
+    Cleaning the content means removing elements that don't have a semantic meaning or one with poor semantic value. We want to keep only the informative elements and remove content that could reduce the quality of the clustering.
+    We want to clean the data to optimize the expensive computational steps (Tokenizations, Lemmatization)
 
-    The idea is to remove any content that would worsen the clustering (REFAIREPHRASE) and increase the computation time.
-    We want to clean the data to optimize the computationnal steps (Tokenizations, Lemmatization)
-
-    Clean messages: (here the rows are of type **str**)
+    Clean messages: (here the content is type **str**)
     - remove emails, url and punctuation
     - remove stopwords from the NLTK list of stopwords
     - tokenize
 
-    Clean tokens: (here the rows are of type **list[str]**)
+    Clean tokens: (here the content is type **list[str]**)
     - remove empty tokens
-    - normalize numbers
-    - remove single characters tokens except a shortlist of word (like pronouns '**I**')
-    - maybe special characters if some found
-    - keep programming tokens ? (x, y , i)
-
-    - lemmatization (done last because takes longer, so done on fewer tokens as possible)
+    - remove numbers, email addresses, URLs, punctuation
+    - remove single characters tokens
+    - lemmatization (done last to be done on fewer tokens as possible, because takes longer)
     """)
     return
 
@@ -477,44 +512,6 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
-def fast_lemmatize(mo):
-    mo.md(r"""
-    def _fast_lemmatize(
-        lf_conv: pl.LazyFrame, token_vars: str | list[str]
-    ) -> pl.LazyFrame:
-        "\"\"
-        lemmatize the tokens
-        - use dict to maps each unique tokens to lemmatizer equivalent
-        - lemmatize all tokens at once with polars list.eval. Super fast
-        "\"\"
-
-        if isinstance(token_vars, str):  # convert to list[str] for consistency
-            token_vars = [token_vars]
-
-        unique_tokens = (
-            lf_conv.select(pl.col("first_user_content_tokens").list.explode())
-            .unique()
-            .drop_nulls()
-            .collect(engine="streaming")
-            .to_series()
-            .to_list()
-        )
-
-        lemma_dict = {
-            token: lemmatize(token, lang="en") for token in unique_tokens
-        }
-        vocab = list(lemma_dict.values())
-
-        return lf_conv.with_columns(
-            pl.col(token_vars).list.eval(
-                pl.element().replace_strict(lemma_dict, default=pl.element())
-            )
-        ), unique_tokens
-    """)
-    return
-
-
 @app.cell
 def _(lemmatize, pl):
     def get_lemma_dict_and_vocab(
@@ -522,23 +519,14 @@ def _(lemmatize, pl):
     ) -> tuple[dict, list]:
         """
         lemmatize the tokens
-        - use dict to maps each unique tokens to lemmatizer equivalent
+        - use a dict to maps each unique tokens to lemmatizer equivalent
         - lemmatize all tokens at once with polars list.eval(). Super fast
         """
 
         if isinstance(token_vars, str):  # convert to list[str] for consistency
             token_vars = [token_vars]
-        """ v1
-        unique_tokens = (
-            lf_conv.select(pl.col("first_user_content_tokens"))
-            .collect(engine="streaming")
-            .select(pl.col("first_user_content_tokens").list.explode().unique())
-            .drop_nulls()
-            .to_series()
-            .to_list()
-        )
-        """
-        # v2
+
+        # ! memory intensive action. The whole data pass through here
         unique_tokens = (
             lf_conv.select(pl.col("first_user_content_tokens").list.explode())
             .unique()
@@ -551,7 +539,7 @@ def _(lemmatize, pl):
         lemma_dict = {
             token: lemmatize(token, lang="en") for token in unique_tokens
         }
-        vocab = list(lemma_dict.keys())  # keys are unique, values arn't
+        vocab = list(lemma_dict.keys())  # keys are unique, values are not
 
         return lemma_dict, vocab
 
@@ -569,21 +557,24 @@ def _(lemmatize, pl):
                 pl.element().replace_strict(lemma_dict, default=pl.element())
             )
         )
+
+
+    # .list.eval() has parallel processing across the rows AND within each row, the modifications are applied to a batch of elements. It's why it's really efficient and fast
     return fast_lemmatize, get_lemma_dict_and_vocab
 
 
 @app.cell
 def _(clean_and_tokenize, fast_lemmatize, get_lemma_dict_and_vocab, pl):
-    # Wrapped the functions into one to reduce intermediate lf overhead and for ease of use with the columns to process
+    # Wrapped the 3 functions that cleans lf_conv into one to reduce intermediates and for ease of use
     def process_message_tokens(
         lf_conv_init: pl.LazyFrame,
         mess_cols: str | list[str],
         stop_pattern: str,
     ) -> tuple[pl.LazyFrame, list]:
         """
-        from init to final form of 'lf_conv', modifies the messages content only:
+        from lf_conv_init to 'lf_conv', modifies the messages content only:
         - clean the messages content and tokenize
-        - get a list of the unique tokens
+        - get a list of the unique tokens -> vocab
         - lemmatize the tokens
         """
 
@@ -592,7 +583,7 @@ def _(clean_and_tokenize, fast_lemmatize, get_lemma_dict_and_vocab, pl):
 
         lf_conv_clean = clean_and_tokenize(lf_conv_init, mess_cols, stop_pattern)
 
-        # functions below works with tokenize version of the input cols, quick update to the var names
+        # functions below works with tokenize version of the input cols, quick update to 'mess_cols' var names
         token_cols = [f"{col}_tokens" for col in mess_cols]
 
         lemma_dict, vocab = get_lemma_dict_and_vocab(lf_conv_clean, token_cols)
