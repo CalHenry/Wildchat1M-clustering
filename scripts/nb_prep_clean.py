@@ -11,7 +11,8 @@ def _():
     import polars as pl
     import numpy as np
     from simplemma import lemmatize
-    return duckdb, lemmatize, mo, pl
+    import json
+    return duckdb, json, lemmatize, mo, pl
 
 
 @app.cell
@@ -278,12 +279,12 @@ def _(mo):
 
 
 @app.cell
-def _(vocab):
+def _(json, vocab):
     # save vocab to disk
 
-    with open("data/processed/vocabtimmeingtest.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(vocab))
-    print("✅ Saved vocab to: data/processed/vocab.txt")
+    with open("data/processed/vocab.json", "w", encoding="utf-8") as f:
+        json.dump(vocab, f, ensure_ascii=False, indent=2)
+    print("✅ Saved vocab to: data/processed/vocab.json")
     return
 
 
@@ -291,7 +292,7 @@ def _(vocab):
 def _(lf_conv):
     # save lf_conv to parquet
     # ! memory intensive excecution, it's here that the data passes trough the RAM
-    lf_conv.sink_parquet("data/clean/df_conv_timingtest.parquet")
+    lf_conv.sink_parquet("data/clean/df_conv.parquet")
     print("✅ Saved lf_conv to: data/clean/df_conv.parquet")
     return
 
@@ -315,7 +316,7 @@ def _(mo):
     - Polars can see the full query plan, from the moment duckdb returns a LazyFrame to the last step that creates lf_conv. It can optimize it, don't materialize the intermediate lazyframe defined (like lf_mess) for maximum performances
     - We took full advantages of the query engine, lazy excecution and streaming engine
     - Most of the code executes in milliseconds: Lazyframes are just query plans and use basically no RAM. The parts of the code that take time are when data is loaded in the RAM, for the **stopwords**, to build the **vocab**, to save the data to a parquet file.
-    - The entire notebook executes in **1m32** (1m06 for the **sink_parquet()** line) *if the stopwords are already downloaded on disk from nltk (this step takes less than a minute)*
+    - The entire notebook executes in **1m29** (1m06 for the **sink_parquet()**) *if the stopwords are already downloaded on disk from nltk*
     """)
     return
 
@@ -326,9 +327,9 @@ def _(mo):
     ```shell
     time uv run scripts/nb_prep_clean.py
 
-    ✅ Saved vocab to: data/processed/vocab.txt
+    ✅ Saved vocab to: data/processed/vocab.json
     ✅ Saved lf_conv to: data/clean/df_conv.parquet
-    uv run scripts/nb_prep_clean.py  168.89s user 52.17s system 241% cpu 1:31.48 total
+    uv run scripts/nb_prep_clean.py  167.72s user 42.57s system 236% cpu 1:28.82 total
     ```
     """)
     return
@@ -539,13 +540,13 @@ def _(lemmatize, pl):
         lemma_dict = {
             token: lemmatize(token, lang="en") for token in unique_tokens
         }
-        vocab = list(lemma_dict.keys())  # keys are unique, values are not
+        vocab = list(lemma_dict.values())  # values are unique, keys are not
 
         return lemma_dict, vocab
 
 
     def fast_lemmatize(
-        lf_conv: pl.lazyframe, token_vars: str | list[str], lemma_dict: dict
+        lf_conv: pl.LazyFrame, token_vars: str | list[str], lemma_dict: dict
     ) -> pl.lazyframe:
         """lemmatize the tokens using a dictionnary and list.eval(). Super fast"""
 
