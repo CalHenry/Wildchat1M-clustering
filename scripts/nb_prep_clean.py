@@ -540,7 +540,7 @@ def _(lemmatize, pl):
         lemma_dict = {
             token: lemmatize(token, lang="en") for token in unique_tokens
         }
-        vocab = list(lemma_dict.values())  # values are unique, keys are not
+        vocab = list(set(lemma_dict.values()))
 
         return lemma_dict, vocab
 
