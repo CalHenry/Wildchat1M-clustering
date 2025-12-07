@@ -6,12 +6,13 @@ app = marimo.App(width="columns")
 
 @app.cell(column=0)
 def _():
-    import marimo as mo
-    import duckdb
-    import polars as pl
-    import numpy as np
-    from simplemma import lemmatize
     import json
+
+    import duckdb
+    import marimo as mo
+    import polars as pl
+    from simplemma import lemmatize
+
     return duckdb, json, lemmatize, mo, pl
 
 
@@ -31,35 +32,46 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    The goal of this notebooks is to cluster the conversations and it requires data manipulations.
+    The goal of this notebook is to clean and prepare the data for clustering.
+    We have to:
+    - Filter only the english content
+    - Gather the content from all 14 files
+    - Manipulate the data to obtain a tidy data with a row for each conversation and a columns for each feature
 
-    The main workflow is in this first column, helper functions are in the second column to the right.
+    This notebook is organized in columns, the first one is the main workflow, the second column contain the helper functions used in the main columns.
 
     ## Data preparation
 
     Our data is spread in 14 parquet files, each row is a conversation. The data schema is optimized for storage not for analysis.
+    For example, in the raw data, the column 'conversation' is a nested structure that contains a list (one item for each message of the conversation), and all the variables about the messages (ex: content, language).
 
+    Data preparation will include reorganizing the dataset to have a tidy structure at the conversation level.
+    We will also clean the data, removing stop words, punctuation... and all the elements that do not hold semantic meaning. We will also [lemmatize](https://www.ibm.com/think/topics/stemming-lemmatization) the words.
+    Finally we will tokenize the messages into list of words to build the **corpus** of our dataset.
+    The raw dataset has ~1 milion rows and we will end up with ~475 000 rows
 
     ### Computational challenge
 
     The entire dataset represents ~15GB of uncompressed data (3GB in Parquet format), which would typically require 45-75GB of RAM using conventional in-memory approaches.
     This notebook processes the data efficiently in a single pipeline using Polars and DuckDB. For details on how **modern query engines**, **lazy** evaluation, and **streaming execution** make this possible, see the README
+    The final dataset weigths ~2GB in parquet.
+
 
     ### A word on the libraries used:
 
-    **DuckDB** and **Polars** are both excellent choices for this type of work. While the project could be completed entirely in DuckDB with SQL queries, I prefer Polars's expressive syntax for complex, chained DataFrame transformations.
+    **DuckDB** and **Polars** are both excellent choices for this type of work. While the project could be completed entirely with any of the 2, I prefer Polars's expressive syntax for complex, chained DataFrame transformations.
     Both libraries feature lazy execution and are highly optimized. The workflow leverages their complementary strengths:
 
-    - **DuckDB** at the beginning for importing data or filtered subsets from raw files—simple queries can accomplish a lot
+    - **DuckDB** to import data or filtered subsets from raw files, simple queries can accomplish a lot
     - **Polars** for complex manipulations in the core workflow
 
     Key benefits of this hybrid approach:
     - Extremely fast data reading (both libraries are excellent)
     - Efficient data import with simple SQL queries
-    - SQL relations work similarly to Polars expressions, making translation seamless
-    - SQL views provide convenient intermediate representations
+    - Expressive pipeline with polars
+    - Complete lazy pipeline allow to optimize from the begining to the end by polars query optimizer
 
-    ➡️ Both libraries are interchangeable. I can choose the best tool for each task while maintaining a seamless workflow.
+    ➡️ Both libraries are interchangeable, but Duckdb requires that the input is either loaded on RAM or written on disk.
     """)
     return
 
@@ -96,7 +108,7 @@ def _(duckdb):
         duckdb.query(
             """
         SELECT * EXCLUDE (toxic, timestamp, redacted, openai_moderation, detoxify_moderation)
-        FROM 'data/raw/*.parquet' 
+        FROM 'data/raw/*.parquet'
         WHERE language = 'English'
         """
         )
@@ -167,7 +179,6 @@ def _(lf, new_fields, pl, remove_nolang_messages, remove_non_english_mess):
         pl.col("conversation_hash") + "_" + pl.col("hashed_ip")
     ).alias("conversation_id")
 
-
     # Flatten the data (explode nested variables), 2 levels depth
     # conversation contains many nested vars and a nested var inside the nested vars: list[struct[struct]]
 
@@ -202,9 +213,7 @@ def _(lf, new_fields, pl, remove_nolang_messages, remove_non_english_mess):
     )
 
     # Clean messages of lf_mess_raw
-    lf_mess = lf_mess_raw.pipe(remove_nolang_messages).pipe(
-        remove_non_english_mess
-    )
+    lf_mess = lf_mess_raw.pipe(remove_nolang_messages).pipe(remove_non_english_mess)
     return (lf_mess,)
 
 
@@ -256,12 +265,12 @@ def _(get_stopwords_pattern, lf_mess, pl, process_message_tokens):
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(rf"""
+    mo.md(r"""
     Takeway:
 
     Most conversations are length 2 (1 user prompt, 1 assistant response). Longer conversations go up to 22 messages and the second most common number of turns is 6.
 
-    *Summary statistics and visualization are aviable in the exploration notebook 'explo_nb.py'*.
+    *Summary statistics and visualization are available in the exploration notebook 'explo_nb.py'*.
 
     We focus on the English conversations and english messages.
     We try to do as many operations as possible at the conversation level to improve simplicity and speed.
@@ -388,6 +397,7 @@ def _(pl):
             )
 
         return lf_mess.remove(pl.col("language_message") == "Nolang")  # 2.
+
     return (remove_nolang_messages,)
 
 
@@ -399,6 +409,7 @@ def _(pl):
             (pl.col("language_message") == "English")
             | (pl.col("language_message") == "Latin")
         )
+
     return (remove_non_english_mess,)
 
 
@@ -432,6 +443,7 @@ def _(stopwords):
         stop_pattern = "|".join(f"\\b{word}\\b" for word in STOP_WORDS)
 
         return stop_pattern
+
     return (get_stopwords_pattern,)
 
 
@@ -469,7 +481,6 @@ def clean_messages(pl):
                 .name.suffix("_tokens")
             ).drop_nulls(columns)  # remove rows with empty messages
         )
-
 
     # [^\x00-\x7F\x80-\xFF\u0100-\u017F\u0180-\u024F\u1E00-\u1EFF]
     return (clean_and_tokenize,)
@@ -537,13 +548,10 @@ def _(lemmatize, pl):
             .to_list()
         )
 
-        lemma_dict = {
-            token: lemmatize(token, lang="en") for token in unique_tokens
-        }
+        lemma_dict = {token: lemmatize(token, lang="en") for token in unique_tokens}
         vocab = list(set(lemma_dict.values()))
 
         return lemma_dict, vocab
-
 
     def fast_lemmatize(
         lf_conv: pl.LazyFrame, token_vars: str | list[str], lemma_dict: dict
@@ -558,7 +566,6 @@ def _(lemmatize, pl):
                 pl.element().replace_strict(lemma_dict, default=pl.element())
             )
         )
-
 
     # .list.eval() has parallel processing across the rows AND within each row, the modifications are applied to a batch of elements. It's why it's really efficient and fast
     return fast_lemmatize, get_lemma_dict_and_vocab
@@ -591,6 +598,7 @@ def _(clean_and_tokenize, fast_lemmatize, get_lemma_dict_and_vocab, pl):
         lf_conv_lema = fast_lemmatize(lf_conv_clean, token_cols, lemma_dict)
 
         return lf_conv_lema, vocab
+
     return (process_message_tokens,)
 
 

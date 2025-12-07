@@ -6,24 +6,22 @@ app = marimo.App(width="columns")
 
 @app.cell(column=0)
 def _():
-    import marimo as mo
     import json
-    import duckdb
-    import polars as pl
-    import numpy as np
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.metrics import silhouette_score
-    from sklearn.metrics.pairwise import cosine_similarity
-    from sklearn.preprocessing import normalize
-    from sklearn.cluster import MiniBatchKMeans, HDBSCAN
-    from sklearn.decomposition import TruncatedSVD
-
-    from sklearn.manifold import TSNE
-    from umap import UMAP
     import random
 
+    import marimo as mo
     import matplotlib.pyplot as plt
+    import numpy as np
+    import polars as pl
     import seaborn as sns
+    from sklearn.cluster import HDBSCAN, MiniBatchKMeans
+    from sklearn.decomposition import TruncatedSVD
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.manifold import TSNE
+    from sklearn.metrics import silhouette_score
+    from sklearn.metrics.pairwise import cosine_similarity
+    from umap import UMAP
+
     return (
         HDBSCAN,
         MiniBatchKMeans,
@@ -43,13 +41,13 @@ def _():
     )
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(rf"""
     This notebook is organized into 3 columns:
-    - **Left:** Common elements and helper functions
-    - **Middle:** K-means clustering and K-means-specific code
-    - **Right:** HDBSCAN clustering and HDBSCAN-specific code
+    - **1:** TF-IDF and helper functions
+    - **2:** K-means clustering and K-means-specific code
+    - **3:** HDBSCAN clustering and HDBSCAN-specific code
 
     {mo.outline()}
 
@@ -110,7 +108,7 @@ def _(json, pl, sample):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## TF-IDF
+    ## 1. TF-IDF
     """)
     return
 
@@ -186,7 +184,7 @@ def _(mo):
 
 @app.cell
 def _(np, pl):
-    # https://github.com/Yixuan-Wang/blog-contents/issues/29 (source of the sample() function)
+    # https://github.com/Yixuan-Wang/blog-contents/issues/29 (source code of the sample() function)
     def sample(
         df: pl.LazyFrame,
         *,
@@ -220,6 +218,7 @@ def _(np, pl):
             .head(size)
             .drop(row_index_name)
         )
+
     return (sample,)
 
 
@@ -239,12 +238,11 @@ def _(TSNE, TruncatedSVD, UMAP):
         # tsne
         tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
         tsne_coords = tsne.fit_transform(tfidf_reduced)
-        tsne_result = manifold_result = {
+        tsne_result = {
             "name": tsne.__class__.__name__,
             "coords": tsne_coords,
         }
         return tsne_result
-
 
     def get_umap_2D_coords(
         tfidf_matrix,
@@ -258,24 +256,21 @@ def _(TSNE, TruncatedSVD, UMAP):
         svd = TruncatedSVD(n_components=50, random_state=42)
         tfidf_reduced = svd.fit_transform(tfidf_matrix)
 
-        umap = UMAP(
-            n_components=2, metric=umap_metric, n_neighbors=umap_n_neighbors
-        )
+        umap = UMAP(n_components=2, metric=umap_metric, n_neighbors=umap_n_neighbors)
         umap_coords = umap.fit_transform(tfidf_reduced)
-        umap_result = manifold_result = {
+        umap_result = {
             "name": umap.__class__.__name__,
             "coords": umap_coords,
         }
         return umap_result
+
     return get_tsne_2D_coords, get_umap_2D_coords
 
 
 @app.cell
 def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
     # explore clusters
-    def nbr_obs_clusters(
-        clustering_model, clusters: int | list[int] | str = "all"
-    ):
+    def nbr_obs_clusters(clustering_model, clusters: int | list[int] | str = "all"):
         """
         print the nbr of obs per cluster
         args:
@@ -283,9 +278,7 @@ def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
             clusters: select clusters by index (first cluster is index 0)
         """
         all_clusters = clustering_model.labels_
-        nbr_clusters = len(np.unique(all_clusters)) - (
-            1 if -1 in all_clusters else 0
-        )
+        nbr_clusters = len(np.unique(all_clusters)) - (1 if -1 in all_clusters else 0)
 
         if isinstance(clusters, int):  # int to list[int] for consistency
             clusters = [clusters]
@@ -310,7 +303,6 @@ def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
                 f"Cluster {cluster_num} has {len(cluster_indices)} conversations, {len(cluster_indices) / df_size:.1%} of total"
             )
 
-
     def top_tfidf_terms(
         clustering_model,
         nbr_terms: int = 15,
@@ -324,9 +316,7 @@ def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
             clusters: select clusters by index (first cluster is index 0)
         """
         all_clusters = clustering_model.labels_
-        nbr_clusters = len(np.unique(all_clusters)) - (
-            1 if -1 in all_clusters else 0
-        )
+        nbr_clusters = len(np.unique(all_clusters)) - (1 if -1 in all_clusters else 0)
 
         if isinstance(clusters, int):  # int to list[int] for consistency
             clusters = [clusters]
@@ -361,7 +351,6 @@ def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
             for term, score in top_terms:
                 print(f"  {term}: {score:.4f}")
 
-
     def sample_rdm_conversations(
         clustering_model,
         nbr_conv_to_print: int,
@@ -376,9 +365,7 @@ def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
             clusters: select clusters by index (first cluster is index 0)
         """
         all_clusters = clustering_model.labels_
-        nbr_clusters = len(np.unique(all_clusters)) - (
-            1 if -1 in all_clusters else 0
-        )
+        nbr_clusters = len(np.unique(all_clusters)) - (1 if -1 in all_clusters else 0)
 
         if isinstance(clusters, int):  # int to list[int] for consistency
             clusters = [clusters]
@@ -418,7 +405,6 @@ def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
                 )
                 print("...")
 
-
     def most_overrepresented_terms(
         clustering_model,
         nbr_terms: int = 15,
@@ -435,9 +421,7 @@ def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
         overall_mean = tfidf_matrix.mean(axis=0).A1
 
         all_clusters = clustering_model.labels_
-        nbr_clusters = len(np.unique(all_clusters)) - (
-            1 if -1 in all_clusters else 0
-        )
+        nbr_clusters = len(np.unique(all_clusters)) - (1 if -1 in all_clusters else 0)
 
         if isinstance(clusters, int):  # int to list[int] for consistency
             clusters = [clusters]
@@ -472,6 +456,7 @@ def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
             print(f"\nCluster {cluster_num}:")
             for idx in top_ratio_indices:
                 print(f"  {feature_names[idx]}: {ratio[idx]:.2f}x more common")
+
     return most_overrepresented_terms, nbr_obs_clusters, top_tfidf_terms
 
 
@@ -493,12 +478,16 @@ def _(np, plt, sns):
         manifold_name = manifold_result["name"]
         manifold_coords = manifold_result["coords"]
 
+        plot_title = f"{manifold_name} Clusters Visualization"
+
         # check if noise cluster existe, if not do nothing
         has_noise = -1 in clusters
         if hide_noise and has_noise:
             no_noise_mask = clusters != -1
             coord_2d = manifold_coords[no_noise_mask]
             clusters = clusters[no_noise_mask]
+            # plot_title = f"{manifold_name} Clusters Visualization (noise hidden)"
+            plot_title += " (noise hidden)"
         else:
             coord_2d = manifold_coords
 
@@ -515,7 +504,7 @@ def _(np, plt, sns):
         )
 
         plt.title(
-            f"{manifold_name} Clusters Visualization",
+            label=plot_title,
             fontsize=16,
             fontweight="bold",
         )
@@ -527,7 +516,6 @@ def _(np, plt, sns):
         plt.ylabel(f"{manifold_name} 2")
         plt.tight_layout()
         plt.show()
-
 
     # detailled picture
     def plot_clusters_grid(
@@ -548,7 +536,7 @@ def _(np, plt, sns):
             raise ValueError("n_clusters_to_display needs to be <= to 20")
 
         clusters = clustering_model.labels_
-        manifold_name = manifold_result["name"]
+        # manifold_name = manifold_result["name"]
         manifold_coords = manifold_result["coords"]
 
         # Handle noise
@@ -603,6 +591,7 @@ def _(np, plt, sns):
 
         plt.tight_layout()
         plt.show()
+
     return plot_clusters, plot_clusters_grid
 
 
@@ -625,13 +614,14 @@ def _(cosine_similarity, np):
             print(f"  Mean cosine similarity: {upper_triangle.mean():.3f}")
             print(f"  Std cosine similarity: {upper_triangle.std():.3f}")
             print()
+
     return
 
 
 @app.cell(column=1, hide_code=True)
 def _(mo):
     mo.md(r"""
-    ##Kmeans
+    ## 2. Kmeans
     """)
     return
 
@@ -639,7 +629,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Determining the Number of Clusters for K-means
+    ### Determine the number of clusters for K-means
 
     K-means requires specifying the number of clusters beforehand. We can estimate the optimal value using metrics but we will use intertia (elbow method) and silhouette score. (Intertia is build in kmeans and silhouette score is slow but add no pressure to the RAM).
 
@@ -703,16 +693,13 @@ def _(MiniBatchKMeans, np, plt, silhouette_score):
             )
             print(f"Run {k} done")
 
-        best_k_silhouette = (
-            np.argmax(silhouette_values) + 2
-        )  # +2 because k starts at 2
+        best_k_silhouette = np.argmax(silhouette_values) + 2  # +2 because k starts at 2
         print("")
         return {
             "inertia_values": inertia_values,
             "silhouette_values": silhouette_values,
             "best_k_silhouette": best_k_silhouette,
         }
-
 
     # find best K for kmeans: plot elbow and silhouette methods
     def plot_silhouette_results(result: dict, max_k: int):
@@ -746,15 +733,14 @@ def _(MiniBatchKMeans, np, plt, silhouette_score):
 
         plt.tight_layout()
         plt.show()
+
     return find_optimal_clusters_kmeans, plot_silhouette_results
 
 
 @app.cell
 def _(find_optimal_clusters_kmeans, plot_silhouette_results, tfidf_matrix):
     max_k = 20
-    optimal_clusters_infos = find_optimal_clusters_kmeans(
-        tfidf_matrix, max_k=max_k
-    )
+    optimal_clusters_infos = find_optimal_clusters_kmeans(tfidf_matrix, max_k=max_k)
     plot_silhouette_results(optimal_clusters_infos, max_k=max_k)
     return
 
@@ -771,6 +757,14 @@ def _(mo):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Run kmeans
+    """)
+    return
+
+
 @app.cell
 def _(MiniBatchKMeans):
     def run_kmeans(n_clusters: int, tfidf_matrix, n_init: int = 10):
@@ -779,6 +773,7 @@ def _(MiniBatchKMeans):
         )
         kmeans.fit_predict(tfidf_matrix)
         return kmeans
+
     return (run_kmeans,)
 
 
@@ -810,11 +805,11 @@ def _(kmeans_6, plot_clusters, plot_clusters_grid, tsne_2d):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Both representations are distorded shots of the reality.
-    TSNE:
+    Both representations are distorded representation of the reality.
+    **TSNE:**
     - distance between the clusters is meaningless (global structure)
 
-    UMAP:
+    **UMAP:**
     - preserve local and global structure
     - create an artificial structure
 
@@ -828,14 +823,14 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    **K=7**
+    **K=6**
 
-    - **1 huge cluster** (5) (~3/4 of the observation points), spread across a huge area
-    - **2 well defined clusters** in their area. Cluster 1 is the 2nd largest (~15%)
-    - **4 other clusters** (3, 2, 4 and 6) all live in the area of the huge cluster 5 and are spread
-    - **few points in the middle** with white space around them. Likelly very far points forced into 2d space resulting in the white space (y=0). Theybelong to cluster 1 but can be because cluster 1 is the closest cluster.
+    - **1 huge cluster** spread across a huge area
+    - **2 well defined clusters** in their area
+    - **0ther clusters** are spread or very localized or small
+    - **Cluster 1 has isolated points in the middle** with white space around them. Likely very far points forced into 2d space resulting in the white space (y=0). They belong to cluster 1 but can be because cluster 1 is the closest cluster.
     -> What kind of messages are those points ?
-      (on the UMAP representation, those points are mixed in with the other clusters where the other points of the cluster 1 are very isolated from the rest)
+    ---
     """)
     return
 
@@ -863,27 +858,26 @@ def _(kmeans_15, plot_clusters, plot_clusters_grid, tsne_2d):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    **K=17**
+    **K=15**
+    With more clusters, the pattern persists:
+    - still 1 massive cluster (10) dominating ~50% of the points
+    - 3 well defined clusters (2, 5, and 1)
+    - previous large cluster has fragmented into multiple smaller clusters (6, 7, 14, etc.)
+    - most remaining clusters are scattered across regions and overlap with the dominant cluster
 
-    With more clusters, the story is not different:
-    - still 1 huge cluster of ~50% of the points
-    - 3 well defined clusters
-    - previous cluster 1 has exploded into 2 clusters (0 and 2). Cluster 0 has the points alone in the middle
-    - all the other clusters are spread between areas and exist in area of the huge cluster
+    Adding more clusters has not improved the clustering quality:
+    - same fundamental structure as with k=7
+    - 1 enormous cluster capturing the bulk of data points remains problematic
+    - only 3/15 clusters are cleanly separated and were already distinct at k=7
+    - the boundary between the massive cluster and the poorly defined ones is ambiguous
 
-    Adding more clusters did not result in a better clustering:
-    - same types of clusters as with k=7
-    - 1 huge cluster that takes the majority of the data points is concerning
-    - only 3/17 clusters are well defined and already well defined with k=7
-    - the difference between the bigger cluster and the other poorly defined is unclear
+    These observations align with what the silhouette score indicated:
+    - low scores reflect significant cluster overlap
+    - stable scores across different k values suggest weak clustering effectiveness, with only 3 clusters truly well-separated
 
-    Those observations confirms what the silhouette score told us:
-    - low score means overlapping clusters
-    - same score for a wide range of clusters means that the clustering effectivness is weak and indeed only 3 clusters are well defined
-
-    Now we can inspect the clusters with their tidf terms and random messages to answser 2 questions:
-    - Are the well defined clusters uniques in tfidf terms, messages ?
-    - Are the poorly defined clusters different from each other and from the bigger cluster
+    Now we can examine the clusters through their tfidf terms and sample messages to address 2 questions:
+    - Are the well defined clusters distinctive in their tfidf terms and messages?
+    - Do the poorly defined clusters differ meaningfully from each other and from the dominant cluster?
     """)
     return
 
@@ -913,9 +907,7 @@ def _(df_conv, kmeans_15, np, pl, tsne_2d):
     print("\n" + "=" * 50)
     print("Text content:")
     print(
-        df_conv.select(pl.col("first_user_content_tokens"))
-        .to_series()
-        .to_list()[idx]
+        df_conv.select(pl.col("first_user_content_tokens")).to_series().to_list()[idx]
     )
     print("=" * 50)
 
@@ -932,10 +924,18 @@ def _(df_conv, kmeans_15, np, pl, tsne_2d):
 @app.cell(hide_code=True)
 def _(mo, same_cluster_nearby):
     mo.md(rf"""
-    The isolated point is not alone, we found {same_cluster_nearby} points in the close area.  
-    Looking at the content of the text, we can see that it's a prompt to generate images with **Midjourney** a popular LLM for image generation.  
-    All the {same_cluster_nearby} points are probably the same Midjourney prompt with potential variations but the same core.  
-    We should find the keywoard and such prompts if we dive into the content of the cluster 0.  
+    The isolated point is not alone, we found {same_cluster_nearby - 1} points in the close area.
+    Looking at the content of the text, we can see that it's a prompt to generate images with **Midjourney** a popular LLM for image generation.
+    All the {same_cluster_nearby - 1} points are probably the same Midjourney prompt with potential variations but the same core.
+    We should find the keywoard and such prompts if we dive into the content of the cluster 0.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Clusters deep dive
     """)
     return
 
@@ -1091,7 +1091,7 @@ def _(mo):
 @app.cell(column=2, hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## HDBCSCAN
+    ## 3. HDBCSCAN
 
     Workflow:
 
@@ -1111,7 +1111,6 @@ def _(mo):
 def _(TruncatedSVD, UMAP):
     # SVD first to deal with the sparse nature of the TFIDF matix, then UMAP on the SVD
     # UMAP on TFIDF is very expensive (UMAP's complexity is O(n×d)), SVD takes care of most of the sparse of the matrix
-
 
     def umap_tfidf_matrix(
         tfidf_matrix,
@@ -1134,6 +1133,7 @@ def _(TruncatedSVD, UMAP):
         X_umap = reducer.fit_transform(X_reduced)
 
         return X_umap
+
     return (umap_tfidf_matrix,)
 
 
@@ -1155,6 +1155,14 @@ def _(mo):
     Keams produces a massive (or 2) cluster even with a higher cluster number.
     **Increasing the minimum cluster size results in fewer overall clusters.**
     How the algorithm responds to different parameter values ? This provides valuable insight into the density and distribution of the clusters.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Determine the best value of *min_cluster_size*
     """)
     return
 
@@ -1187,7 +1195,7 @@ def _(HDBSCAN, X_umap, np, plt):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     We see a very clear breakpoint at exactly 347 (reminder: we work with a sample of the full data).
@@ -1199,6 +1207,14 @@ def _(mo):
 
     We will set **min_cluster_size** < 347, since we want many small clusters with noise rather than a huge generic cluster.
     A cluster of size n = 347 would be ~ 0.7% of the total.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Run HDBSCAN
     """)
     return
 
@@ -1227,6 +1243,14 @@ def _(hdb, plot_clusters, plot_clusters_grid, umap_2d):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Clusters deep dive
+    """)
+    return
+
+
 @app.cell
 def _(hdb, most_overrepresented_terms, nbr_obs_clusters, np, top_tfidf_terms):
     # Clusters exploration
@@ -1243,7 +1267,7 @@ def _(hdb, most_overrepresented_terms, nbr_obs_clusters, np, top_tfidf_terms):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     **HDBSCAN assigned ~43% (20,551 conversations) to noise**
@@ -1293,7 +1317,7 @@ def _(mo):
 
     ---
 
-    ### **Creative Writing (Clusters 7, 13, 24) - 5.7% of total**
+    **Creative Writing (Clusters 7, 13, 24) - 5.7% of total**
     Very specific niche themes:
     - **Cluster 7 (1.3%)**: Sports and university ?
     - **Cluster 13 (2.1%)**: TV shows related ?
@@ -1391,7 +1415,15 @@ def _(mo):
     - more clusters overall
     - no new big clusters, or known medium/ small clusters upgrading to big clusters
 
-    We can't run **HDBSCAN** on the entire dataset because it doesn't fit intoo my RAM, but **MiniBatchKmeans** works like a charm and we will be able to compre the results for the full dataset with the results of Kmeans ans HDBSCAN on the sample.
+    We can't run **HDBSCAN** on the entire dataset because it doesn't fit into my RAM, but **MiniBatchKmeans** works like a charm and we will be able to compare the results for the full dataset with the results of Kmeans and HDBSCAN on the subset.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ---
     """)
     return
 
