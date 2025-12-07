@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.17.7"
+__generated_with = "0.17.8"
 app = marimo.App(width="columns")
 
 
@@ -677,7 +677,6 @@ def _(np, pl, plt, sns, tfidf_matrix, vectorizer):
     top_words = _tfidfviz.sort("tfidf_score", descending=True).head(top_n)
 
     # Convert to pandas for seaborn (seaborn works better with pandas)
-    # top_words_pd = top_words.to_pandas()
 
     # Create the barplot
     plt.figure(figsize=(10, 6))
@@ -893,6 +892,43 @@ def _(lemmatize, pl):
     # Retrieve the unique tokens later
     # _lf_conv_lvl._vocab
     return
+
+
+app._unparsable_cell(
+    r"""
+    # DEBUG vocab
+    # Explore all duplicates due to lemmatization
+    # 2 differents tokens to are lemmatize to the same version create 1 duplicates
+    # ex: zoomed -> zoom and zooms -> zoom
+    # The FIX is to use a 'set()' on the list
+
+    from collections import Counter
+
+        # Count occurrences of each lemma
+        lemma_counter = Counter(test_lemma_dict.values())
+
+        # Find lemmas that appear more than once
+        duplicate_lemmas = {
+            lemma for lemma, count in lemma_counter.items() if count > 1
+        }
+
+        # Collect all (token, lemma) pairs for duplicate lemmas
+        duplicate_pairs = [
+            (token, lemma)
+            for token, lemma in test_lemma_dict.items()
+            if lemma in duplicate_lemmas
+        ]
+
+        # Sort by lemma (alphabetical order)
+        duplicate_pairs_sorted = sorted(duplicate_pairs, key=lambda x: x[1])
+
+        # Print the sorted results
+        for token, lemma in duplicate_pairs_sorted:
+            print(f\"Token: '{token}' -> Lemma: '{lemma}'\")
+
+    """,
+    name="_"
+)
 
 
 if __name__ == "__main__":
