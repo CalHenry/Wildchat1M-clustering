@@ -1,11 +1,9 @@
 import marimo
 
-__generated_with = "0.17.8"
+__generated_with = "0.18.4"
 app = marimo.App(width="columns")
 
-
-@app.cell(column=0)
-def _():
+with app.setup:
     import json
     import random
 
@@ -22,27 +20,9 @@ def _():
     from sklearn.metrics.pairwise import cosine_similarity
     from umap import UMAP
 
-    return (
-        HDBSCAN,
-        MiniBatchKMeans,
-        TSNE,
-        TfidfVectorizer,
-        TruncatedSVD,
-        UMAP,
-        cosine_similarity,
-        json,
-        mo,
-        np,
-        pl,
-        plt,
-        random,
-        silhouette_score,
-        sns,
-    )
-
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(rf"""
     This notebook is organized into 3 columns:
     - **1:** TF-IDF and helper functions
@@ -79,7 +59,7 @@ def _(mo):
 
 
 @app.cell
-def _(json, pl, sample):
+def _():
     # import data
 
     with open("data/processed/vocab.json", "r", encoding="utf-8") as f:
@@ -99,14 +79,15 @@ def _(json, pl, sample):
         pl.col("first_user_content", "first_user_content_tokens")
     )
 
-    df_conv = sample(df=lf_conv, fraction=0.1, seed=42).collect(engine="streaming")
+    # df_conv = sample(df=lf_conv, fraction=0.1, seed=42).collect(engine="streaming")
+    df_conv = lf_conv.collect(engine="streaming")
 
     df_size = df_conv.height
-    return df_conv, df_size, vocab
+    return df_conv, lf_conv, vocab
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ## 1. TF-IDF
     """)
@@ -114,7 +95,7 @@ def _(mo):
 
 
 @app.cell
-def _(TfidfVectorizer, df_conv, pl, vocab):
+def _(df_conv, vocab):
     vectorizer = TfidfVectorizer(
         tokenizer=lambda x: x,  # dummy tokenizer
         vocabulary=vocab,
@@ -132,7 +113,7 @@ def _(TfidfVectorizer, df_conv, pl, vocab):
 
 
 @app.cell
-def _(np, tfidf_matrix, vectorizer):
+def _(tfidf_matrix, vectorizer):
     feature_names = vectorizer.get_feature_names_out()
 
     mean_tfidf = np.asarray(tfidf_matrix.mean(axis=0)).flatten()
@@ -140,7 +121,7 @@ def _(np, tfidf_matrix, vectorizer):
 
 
 @app.cell
-def _(feature_names, mean_tfidf, pl, plt, sns):
+def _(feature_names, mean_tfidf):
     # Top words tfidf
 
     _tfidfviz = pl.DataFrame({"word": feature_names, "tfidf_score": mean_tfidf})
@@ -162,19 +143,19 @@ def _(feature_names, mean_tfidf, pl, plt, sns):
 
 
 @app.cell
-def _(get_tsne_2D_coords, tfidf_matrix):
+def _(tfidf_matrix):
     tsne_2d = get_tsne_2D_coords(tfidf_matrix)
     return (tsne_2d,)
 
 
 @app.cell
-def _(get_umap_2D_coords, tfidf_matrix):
+def _(tfidf_matrix):
     umap_2d = get_umap_2D_coords(tfidf_matrix)
     return (umap_2d,)
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     #### Helpers
     ---
@@ -182,444 +163,474 @@ def _(mo):
     return
 
 
-@app.cell
-def _(np, pl):
-    # https://github.com/Yixuan-Wang/blog-contents/issues/29 (source code of the sample() function)
-    def sample(
-        df: pl.LazyFrame,
-        *,
-        size: int | None = None,
-        fraction: float | None = None,
-        seed: int | None = None,
-        row_index_name: str = "row_index",
-    ):
-        if not ((size is None) ^ (fraction is None)):
-            raise ValueError(
-                "One and only one of `size` or `fraction` must be specified."
-            )
-
-        # First let's scan the whole LazyFrame to see how many data we have
-        # If you are sure that the LazyFrame is homogenous,
-        # you can probably just sample from the head
-        height: int = df.select(pl.len()).collect().item()
-        if size is None:
-            size = int(height * fraction)  # type: ignore
-
-        # Use numpy to create a sample of the indices
-        samples = set(
-            np.random.default_rng(seed).choice(height, size=size, replace=False)
+@app.function
+# https://github.com/Yixuan-Wang/blog-contents/issues/29 (source code of the sample() function)
+def sample(
+    df: pl.LazyFrame,
+    *,
+    size: int | None = None,
+    fraction: float | None = None,
+    seed: int | None = None,
+    row_index_name: str = "row_index",
+):
+    if not ((size is None) ^ (fraction is None)):
+        raise ValueError(
+            "One and only one of `size` or `fraction` must be specified."
         )
 
-        return (
-            df.with_row_index(row_index_name)
-            .filter(pl.col(row_index_name).is_in(samples))
-            # Let's short-circuit when we already have the right size
-            # this makes the best case time to be O(m^2)
-            .head(size)
-            .drop(row_index_name)
-        )
+    # First let's scan the whole LazyFrame to see how many data we have
+    # If you are sure that the LazyFrame is homogenous,
+    # you can probably just sample from the head
+    height: int = df.select(pl.len()).collect().item()
+    if size is None:
+        size = int(height * fraction)  # type: ignore
 
-    return (sample,)
+    # Use numpy to create a sample of the indices
+    samples = set(
+        np.random.default_rng(seed).choice(height, size=size, replace=False)
+    )
 
-
-@app.cell
-def _(TSNE, TruncatedSVD, UMAP):
-    def get_tsne_2D_coords(tfidf_matrix, perplexity: int = 30) -> dict:
-        """
-        run TSNE with 2 components after a TruncatedSVD to reduce computation time
-        (input is a tfidf matrix which is sparse)
-
-        ! TSNE can be long and expensive compute
-        """
-
-        svd = TruncatedSVD(n_components=50, random_state=42)
-        tfidf_reduced = svd.fit_transform(tfidf_matrix)
-
-        # tsne
-        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
-        tsne_coords = tsne.fit_transform(tfidf_reduced)
-        tsne_result = {
-            "name": tsne.__class__.__name__,
-            "coords": tsne_coords,
-        }
-        return tsne_result
-
-    def get_umap_2D_coords(
-        tfidf_matrix,
-        umap_metric: str = "cosine",
-        umap_n_neighbors: int = 200,
-    ) -> dict:
-        """
-        run UMAP with 2 components after a TruncatedSVD to reduce computation time
-        (input is a tfidf matrix which is sparse)
-        """
-        svd = TruncatedSVD(n_components=50, random_state=42)
-        tfidf_reduced = svd.fit_transform(tfidf_matrix)
-
-        umap = UMAP(n_components=2, metric=umap_metric, n_neighbors=umap_n_neighbors)
-        umap_coords = umap.fit_transform(tfidf_reduced)
-        umap_result = {
-            "name": umap.__class__.__name__,
-            "coords": umap_coords,
-        }
-        return umap_result
-
-    return get_tsne_2D_coords, get_umap_2D_coords
+    return (
+        df.with_row_index(row_index_name)
+        .filter(pl.col(row_index_name).is_in(samples))
+        # Let's short-circuit when we already have the right size
+        # this makes the best case time to be O(m^2)
+        .head(size)
+        .drop(row_index_name)
+    )
 
 
-@app.cell
-def _(df_conv, df_size, feature_names, np, pl, random, tfidf_matrix):
-    # explore clusters
-    def nbr_obs_clusters(clustering_model, clusters: int | list[int] | str = "all"):
-        """
-        print the nbr of obs per cluster
-        args:
-            clustering_model: A fitted clustering model that has a labels_ attribute
-            clusters: select clusters by index (first cluster is index 0)
-        """
-        all_clusters = clustering_model.labels_
-        nbr_clusters = len(np.unique(all_clusters)) - (1 if -1 in all_clusters else 0)
+@app.function
+def get_tsne_2D_coords(tfidf_matrix, perplexity: int = 30) -> dict:
+    """
+    run TSNE with 2 components after a TruncatedSVD to reduce computation time
+    (input is a tfidf matrix which is sparse)
 
-        if isinstance(clusters, int):  # int to list[int] for consistency
-            clusters = [clusters]
-        # Determine which clusters to process
-        if clusters == "all":
-            clusters_to_process = range(nbr_clusters)
-        elif isinstance(clusters, list):
-            for c in clusters:
-                if c < 0 or c >= nbr_clusters:
-                    raise ValueError(
-                        f"Cluster {c} is out of range. Valid range: 0-{nbr_clusters - 1}"
-                    )
-            clusters_to_process = clusters
-        else:
-            raise TypeError(
-                f"clusters must be 'all', int, or list[int], got {type(clusters)}"
-            )
+    ! TSNE can be long and expensive compute
+    """
 
-        for cluster_num in clusters_to_process:
-            cluster_indices = np.where(all_clusters == cluster_num)[0]
-            print(
-                f"Cluster {cluster_num} has {len(cluster_indices)} conversations, {len(cluster_indices) / df_size:.1%} of total"
-            )
+    svd = TruncatedSVD(n_components=50, random_state=42)
+    tfidf_reduced = svd.fit_transform(tfidf_matrix)
 
-    def top_tfidf_terms(
-        clustering_model,
-        nbr_terms: int = 15,
-        clusters: int | list[int] | str = "all",
-    ):
-        """
-        Print top n terms with the higest TFIDF score for each cluster
+    # tsne
+    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+    tsne_coords = tsne.fit_transform(tfidf_reduced)
+    tsne_result = {
+        "name": tsne.__class__.__name__,
+        "coords": tsne_coords,
+    }
+    return tsne_result
 
-        args:
-            clustering_model: A fitted clustering model that has a labels_ attribute
-            clusters: select clusters by index (first cluster is index 0)
-        """
-        all_clusters = clustering_model.labels_
-        nbr_clusters = len(np.unique(all_clusters)) - (1 if -1 in all_clusters else 0)
 
-        if isinstance(clusters, int):  # int to list[int] for consistency
-            clusters = [clusters]
+@app.function
+def get_umap_2D_coords(
+    tfidf_matrix,
+    umap_metric: str = "cosine",
+    umap_n_neighbors: int = 200,
+) -> dict:
+    """
+    run UMAP with 2 components after a TruncatedSVD to reduce computation time
+    (input is a tfidf matrix which is sparse)
+    """
+    svd = TruncatedSVD(n_components=50, random_state=42)
+    tfidf_reduced = svd.fit_transform(tfidf_matrix)
 
-        # Determine which clusters to process
-        if clusters == "all":
-            clusters_to_process = range(nbr_clusters)
-        elif isinstance(clusters, list):
-            for c in clusters:
-                if c < 0 or c >= nbr_clusters:
-                    raise ValueError(
-                        f"Cluster {c} is out of range. Valid range: 0-{nbr_clusters - 1}"
-                    )
-            clusters_to_process = clusters
-        else:
-            raise TypeError(
-                f"clusters must be 'all', int, or list[int], got {type(clusters)}"
-            )
+    umap = UMAP(
+        n_components=2, metric=umap_metric, n_neighbors=umap_n_neighbors
+    )
+    umap_coords = umap.fit_transform(tfidf_reduced)
+    umap_result = {
+        "name": umap.__class__.__name__,
+        "coords": umap_coords,
+    }
+    return umap_result
 
-        for cluster_num in clusters_to_process:
-            cluster_indices = np.where(all_clusters == cluster_num)[0]
 
-            # TF-IDF scores for the cluster
-            cluster_tfidf = tfidf_matrix[cluster_indices].mean(axis=0).A1
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Cluster exploration functions
+    """)
+    return
 
-            # Get top n terms
-            top_indices = cluster_tfidf.argsort()[-nbr_terms:][::-1]
-            top_terms = [(feature_names[i], cluster_tfidf[i]) for i in top_indices]
 
-            print("Top TFIDF terms:")
-            print(f"\nCluster {cluster_num}:")
-            for term, score in top_terms:
-                print(f"  {term}: {score:.4f}")
+@app.function
+# explore clusters
+def nbr_obs_clusters(
+    clustering_model, size_df: int, clusters: int | list[int] | str = "all"
+):
+    """
+    print the nbr of obs per cluster
+    args:
+        clustering_model: A fitted clustering model that has a labels_ attribute
+        size_df: should be = df.height (in polars)
+        clusters: select clusters by index (first cluster is index 0)
+    """
+    all_clusters = clustering_model.labels_
+    nbr_clusters = len(np.unique(all_clusters)) - (
+        1 if -1 in all_clusters else 0
+    )
 
-    def sample_rdm_conversations(
-        clustering_model,
-        nbr_conv_to_print: int,
-        clusters: int | list[int] | str = "all",
-    ):
-        """
-        Print n random conversations for each cluster
-        print first 500 characters of each message (! can print a lot to the console)
-
-        args:
-            clustering_model: A fitted clustering model that has a labels_ attribute
-            clusters: select clusters by index (first cluster is index 0)
-        """
-        all_clusters = clustering_model.labels_
-        nbr_clusters = len(np.unique(all_clusters)) - (1 if -1 in all_clusters else 0)
-
-        if isinstance(clusters, int):  # int to list[int] for consistency
-            clusters = [clusters]
-        # Determine which clusters to process
-        if clusters == "all":
-            clusters_to_process = range(nbr_clusters)
-        elif isinstance(clusters, list):
-            for c in clusters:
-                if c < 0 or c >= nbr_clusters:
-                    raise ValueError(
-                        f"Cluster {c} is out of range. Valid range: 0-{nbr_clusters - 1}"
-                    )
-            clusters_to_process = clusters
-        else:
-            raise TypeError(
-                f"clusters must be 'all', int, or list[int], got {type(clusters)}"
-            )
-
-        # get and print messages
-        for cluster_num in clusters_to_process:
-            cluster_indices = np.where(all_clusters == cluster_num)[0]
-
-            # Sample 10 random conversations
-            sample_size = min(nbr_conv_to_print, len(cluster_indices))
-            sample_indices = random.sample(list(cluster_indices), sample_size)
-
-            print(f"\n{'=' * 50}")
-            print(f"CLUSTER {cluster_num} - Sample Conversations")
-            print(f"{'=' * 50}")
-
-            for idx in sample_indices:
-                print(f"\n--- Conversation {idx} ---")
-                print(
-                    df_conv.select(pl.col("first_user_content"))
-                    .to_series()
-                    .to_list()[idx][:500]
+    if isinstance(clusters, int):  # int to list[int] for consistency
+        clusters = [clusters]
+    # Determine which clusters to process
+    if clusters == "all":
+        clusters_to_process = range(nbr_clusters)
+    elif isinstance(clusters, list):
+        for c in clusters:
+            if c < 0 or c >= nbr_clusters:
+                raise ValueError(
+                    f"Cluster {c} is out of range. Valid range: 0-{nbr_clusters - 1}"
                 )
-                print("...")
+        clusters_to_process = clusters
+    else:
+        raise TypeError(
+            f"clusters must be 'all', int, or list[int], got {type(clusters)}"
+        )
 
-    def most_overrepresented_terms(
-        clustering_model,
-        nbr_terms: int = 15,
-        clusters: int | list[int] | str = "all",
-    ):
-        """
-        Print top n most overrepresented TFIDF terms for each cluster
-
-        args:
-            clustering_model: A fitted clustering model that has a labels_ attribute
-            clusters: select clusters by index (first cluster is index 0)
-        """
-
-        overall_mean = tfidf_matrix.mean(axis=0).A1
-
-        all_clusters = clustering_model.labels_
-        nbr_clusters = len(np.unique(all_clusters)) - (1 if -1 in all_clusters else 0)
-
-        if isinstance(clusters, int):  # int to list[int] for consistency
-            clusters = [clusters]
-        # Determine which clusters to process
-        if clusters == "all":
-            clusters_to_process = range(nbr_clusters)
-        elif isinstance(clusters, list):
-            for c in clusters:
-                if c < 0 or c >= nbr_clusters:
-                    raise ValueError(
-                        f"Cluster {c} is out of range. Valid range: 0-{nbr_clusters - 1}"
-                    )
-            clusters_to_process = clusters
-        else:
-            raise TypeError(
-                f"clusters must be 'all', int, or list[int], got {type(clusters)}"
-            )
-
-        for cluster_num in clusters_to_process:
-            cluster_indices = np.where(all_clusters == cluster_num)[0]
-            cluster_mean = tfidf_matrix[cluster_indices].mean(axis=0).A1
-
-            # Calculate ratio (overrepresentation)
-            ratio = cluster_mean / (
-                overall_mean + 1e-10
-            )  # Add small value to avoid division by zero
-
-            # Get most overrepresented terms
-            top_ratio_indices = ratio.argsort()[-nbr_terms:][::-1]
-
-            print("Most Overrepresented Terms:")
-            print(f"\nCluster {cluster_num}:")
-            for idx in top_ratio_indices:
-                print(f"  {feature_names[idx]}: {ratio[idx]:.2f}x more common")
-
-    return most_overrepresented_terms, nbr_obs_clusters, top_tfidf_terms
+    for cluster_num in clusters_to_process:
+        cluster_indices = np.where(all_clusters == cluster_num)[0]
+        print(
+            f"Cluster {cluster_num} has {len(cluster_indices)} conversations, {len(cluster_indices) / size_df:.1%} of total"
+        )
 
 
-@app.cell
-def _(np, plt, sns):
-    # plot functions
+@app.function
+def top_tfidf_terms(
+    clustering_model,
+    tfidf_matrix,
+    vectorizer: TfidfVectorizer,
+    nbr_terms: int = 15,
+    clusters: int | list[int] | str = "all",
+):
+    """
+    Print top n terms with the higest TFIDF score for each cluster
 
-    # Big picture
-    def plot_clusters(clustering_model, manifold_result: dict, hide_noise: bool):
-        """
-        plot all the points, colored by cluster on a 2D representation
-        (TSNE usually better to see clusters in 2D)
+    args:
+        clustering_model: A fitted clustering model that has a labels_ attribute
+        tfidf_matrix: fit_transformed tfidf matrix
+        vectorizer: fitted TfidfVectorizer instance
+        clusters: select clusters by index (first cluster is index 0)
+    """
+    all_clusters = clustering_model.labels_
+    nbr_clusters = len(np.unique(all_clusters)) - (
+        1 if -1 in all_clusters else 0
+    )
+    feature_names = vectorizer.get_feature_names_out()
 
-        args:
-            clustering_model: A fitted clustering model that has a labels_ attribute
-            manifold_result: dict of a name and the coords of a manifold algo
-        """
-        clusters = clustering_model.labels_
-        manifold_name = manifold_result["name"]
-        manifold_coords = manifold_result["coords"]
+    if isinstance(clusters, int):  # int to list[int] for consistency
+        clusters = [clusters]
 
-        plot_title = f"{manifold_name} Clusters Visualization"
+    # Determine which clusters to process
+    if clusters == "all":
+        clusters_to_process = range(nbr_clusters)
+    elif isinstance(clusters, list):
+        for c in clusters:
+            if c < 0 or c >= nbr_clusters:
+                raise ValueError(
+                    f"Cluster {c} is out of range. Valid range: 0-{nbr_clusters - 1}"
+                )
+        clusters_to_process = clusters
+    else:
+        raise TypeError(
+            f"clusters must be 'all', int, or list[int], got {type(clusters)}"
+        )
 
-        # check if noise cluster existe, if not do nothing
-        has_noise = -1 in clusters
-        if hide_noise and has_noise:
-            no_noise_mask = clusters != -1
-            coord_2d = manifold_coords[no_noise_mask]
-            clusters = clusters[no_noise_mask]
-            # plot_title = f"{manifold_name} Clusters Visualization (noise hidden)"
-            plot_title += " (noise hidden)"
-        else:
-            coord_2d = manifold_coords
+    print("Top TFIDF terms:")
+    for cluster_num in clusters_to_process:
+        cluster_indices = np.where(all_clusters == cluster_num)[0]
 
-        plt.figure(figsize=(8, 6))
-        ax = sns.scatterplot(
-            x=coord_2d[:, 0],
-            y=coord_2d[:, 1],
-            hue=clusters,
-            palette="tab20",
-            alpha=0.6,
+        # TF-IDF scores for the cluster
+        cluster_tfidf = tfidf_matrix[cluster_indices].mean(axis=0).A1
+
+        # Get top n terms
+        top_indices = cluster_tfidf.argsort()[-nbr_terms:][::-1]
+        top_terms = [(feature_names[i], cluster_tfidf[i]) for i in top_indices]
+
+        print(f"\nCluster {cluster_num}:")
+        for term, score in top_terms:
+            print(f"  {term}: {score:.4f}")
+
+
+@app.function
+def sample_rdm_conversations(
+    clustering_model,
+    content_series: pl.Series,
+    nbr_conv_to_print: int,
+    clusters: int | list[int] | str = "all",
+):
+    """
+    Print n random conversations for each cluster
+    print first 500 characters of each message (! can print a lot to the console)
+
+    args:
+        clustering_model: A fitted clustering model that has a labels_ attribute
+        content_series: variable that has the texts (ex: df_conv['first_user_content'])
+        clusters: select clusters by index (first cluster is index 0)
+    """
+    all_clusters = clustering_model.labels_
+    nbr_clusters = len(np.unique(all_clusters)) - (
+        1 if -1 in all_clusters else 0
+    )
+
+    if isinstance(clusters, int):  # int to list[int] for consistency
+        clusters = [clusters]
+    # Determine which clusters to process
+    if clusters == "all":
+        clusters_to_process = range(nbr_clusters)
+    elif isinstance(clusters, list):
+        for c in clusters:
+            if c < 0 or c >= nbr_clusters:
+                raise ValueError(
+                    f"Cluster {c} is out of range. Valid range: 0-{nbr_clusters - 1}"
+                )
+        clusters_to_process = clusters
+    else:
+        raise TypeError(
+            f"clusters must be 'all', int, or list[int], got {type(clusters)}"
+        )
+
+    # get and print messages
+    for cluster_num in clusters_to_process:
+        cluster_indices = np.where(all_clusters == cluster_num)[0]
+
+        # Sample 10 random conversations
+        sample_size = min(nbr_conv_to_print, len(cluster_indices))
+        sample_indices = random.sample(list(cluster_indices), sample_size)
+
+        print(f"\n{'=' * 50}")
+        print(f"CLUSTER {cluster_num} - Sample Conversations")
+        print(f"{'=' * 50}")
+
+        for idx in sample_indices:
+            print(f"\n--- Conversation {idx} ---")
+            print(content_series.to_series().to_list()[idx][:500])
+            print("...")
+
+
+@app.function
+def most_overrepresented_terms(
+    clustering_model,
+    tfidf_matrix,
+    vectorizer: TfidfVectorizer,
+    nbr_terms: int = 15,
+    clusters: int | list[int] | str = "all",
+):
+    """
+    Print top n most overrepresented TFIDF terms for each cluster
+
+    args:
+        clustering_model: A fitted clustering model that has a labels_ attribute
+        tfidf_matrix: fit_transformed tfidf matrix
+        vectorizer: fitted TfidfVectorizer instance
+        clusters: select clusters by index (first cluster is index 0)
+    """
+
+    overall_mean = tfidf_matrix.mean(axis=0).A1
+
+    all_clusters = clustering_model.labels_
+    nbr_clusters = len(np.unique(all_clusters)) - (
+        1 if -1 in all_clusters else 0
+    )
+    feature_names = vectorizer.get_feature_names_out()
+
+    if isinstance(clusters, int):  # int to list[int] for consistency
+        clusters = [clusters]
+    # Determine which clusters to process
+    if clusters == "all":
+        clusters_to_process = range(nbr_clusters)
+    elif isinstance(clusters, list):
+        for c in clusters:
+            if c < 0 or c >= nbr_clusters:
+                raise ValueError(
+                    f"Cluster {c} is out of range. Valid range: 0-{nbr_clusters - 1}"
+                )
+        clusters_to_process = clusters
+    else:
+        raise TypeError(
+            f"clusters must be 'all', int, or list[int], got {type(clusters)}"
+        )
+
+    print("Most Overrepresented Terms:")
+    for cluster_num in clusters_to_process:
+        cluster_indices = np.where(all_clusters == cluster_num)[0]
+        cluster_mean = tfidf_matrix[cluster_indices].mean(axis=0).A1
+
+        # Calculate ratio (overrepresentation)
+        ratio = cluster_mean / (
+            overall_mean + 1e-10
+        )  # Add small value to avoid division by zero
+
+        # Get most overrepresented terms
+        top_ratio_indices = ratio.argsort()[-nbr_terms:][::-1]
+
+        print(f"\nCluster {cluster_num}:")
+        for idx in top_ratio_indices:
+            print(f"  {feature_names[idx]}: {ratio[idx]:.2f}x more common")
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Plot functions
+    """)
+    return
+
+
+@app.function
+# Big picture
+def plot_clusters(clustering_model, manifold_result: dict, hide_noise: bool):
+    """
+    plot all the points, colored by cluster on a 2D representation
+    (TSNE usually better to see clusters in 2D)
+
+    args:
+        clustering_model: A fitted clustering model that has a labels_ attribute
+        manifold_result: dict of a name and the coords of a manifold algo
+    """
+    clusters = clustering_model.labels_
+    manifold_name = manifold_result["name"]
+    manifold_coords = manifold_result["coords"]
+
+    plot_title = f"{manifold_name} Clusters Visualization"
+
+    # check if noise cluster existe, if not do nothing
+    has_noise = -1 in clusters
+    if hide_noise and has_noise:
+        no_noise_mask = clusters != -1
+        coord_2d = manifold_coords[no_noise_mask]
+        clusters = clusters[no_noise_mask]
+        # plot_title = f"{manifold_name} Clusters Visualization (noise hidden)"
+        plot_title += " (noise hidden)"
+    else:
+        coord_2d = manifold_coords
+
+    plt.figure(figsize=(8, 6))
+    ax = sns.scatterplot(
+        x=coord_2d[:, 0],
+        y=coord_2d[:, 1],
+        hue=clusters,
+        palette="tab20",
+        alpha=0.6,
+        s=20,
+        edgecolor="k",
+        linewidth=0.5,
+    )
+
+    plt.title(
+        label=plot_title,
+        fontsize=16,
+        fontweight="bold",
+    )
+    if len(set(clusters)) < 8:
+        ax.legend(title="Cluster", bbox_to_anchor=(1.05, 1), loc="upper left")
+    else:
+        ax.legend_.remove()
+    plt.xlabel(f"{manifold_name} 1")
+    plt.ylabel(f"{manifold_name} 2")
+    plt.tight_layout()
+    plt.show()
+
+
+@app.function
+# detailled picture
+def plot_clusters_grid(
+    clustering_model,
+    manifold_result: dict,
+    hide_noise: bool,
+    n_clusters_to_display: int = 20,
+):
+    """
+    Plot each of the top n clusters in a grid of n*6. Sorted descending order of cluster size
+    Args:
+        clustering_model: A fitted clustering model with a `labels_` attribute
+        manifold_result: Dict with keys "name" (str) and "coords" (2D array)
+        hide_noise: If True, exclude points labeled as noise (-1)
+        n_clusters_to_display: Number of top clusters to display (<= 20)
+    """
+    if n_clusters_to_display > 20:
+        raise ValueError("n_clusters_to_display needs to be <= to 20")
+
+    clusters = clustering_model.labels_
+    # manifold_name = manifold_result["name"]
+    manifold_coords = manifold_result["coords"]
+
+    # Handle noise
+    has_noise = -1 in clusters
+    if hide_noise and has_noise:
+        no_noise_mask = clusters != -1
+        coord_2d = manifold_coords[no_noise_mask]
+        clusters = clusters[no_noise_mask]
+    else:
+        coord_2d = manifold_coords
+
+    # Count the number of points in each cluster
+    unique_clusters, cluster_counts = np.unique(clusters, return_counts=True)
+    # Sort clusters by size (descending) and take top N
+    sorted_indices = np.argsort(-cluster_counts)[:n_clusters_to_display]
+    sorted_clusters = unique_clusters[sorted_indices]
+    sorted_counts = cluster_counts[sorted_indices]
+    n_clusters = len(sorted_clusters)
+
+    # Global min and max for x and y
+    global_x_min, global_x_max = coord_2d[:, 0].min(), coord_2d[:, 0].max()
+    global_y_min, global_y_max = coord_2d[:, 1].min(), coord_2d[:, 1].max()
+
+    # 6 max per row for clarity
+    n_cols = min(n_clusters, 6)
+    n_rows = int(np.ceil(n_clusters / n_cols))
+
+    # grid
+    fig, axes = plt.subplots(
+        nrows=n_rows, ncols=n_cols, figsize=(5 * n_cols, 5 * n_rows)
+    )
+    axes = axes.flatten()
+
+    for i, ax in enumerate(axes):
+        if i >= n_clusters:
+            ax.axis("off")  # Hide unused subplots
+            continue
+        cluster = sorted_clusters[i]
+        mask = clusters == cluster
+        ax.scatter(
+            coord_2d[mask, 0],
+            coord_2d[mask, 1],
+            color=sns.color_palette("tab20")[i],
             s=20,
             edgecolor="k",
             linewidth=0.5,
         )
+        ax.set_title(f"Cluster {cluster} (Size: {sorted_counts[i]})")
+        # Set same scale for all subplots
+        ax.set_xlim(global_x_min, global_x_max)
+        ax.set_ylim(global_y_min, global_y_max)
 
-        plt.title(
-            label=plot_title,
-            fontsize=16,
-            fontweight="bold",
-        )
-        if len(set(clusters)) < 8:
-            ax.legend(title="Cluster", bbox_to_anchor=(1.05, 1), loc="upper left")
-        else:
-            ax.legend_.remove()
-        plt.xlabel(f"{manifold_name} 1")
-        plt.ylabel(f"{manifold_name} 2")
-        plt.tight_layout()
-        plt.show()
-
-    # detailled picture
-    def plot_clusters_grid(
-        clustering_model,
-        manifold_result: dict,
-        hide_noise: bool,
-        n_clusters_to_display: int = 20,
-    ):
-        """
-        Plot each of the top n clusters in a grid of n*6. Sorted descending order of cluster size
-        Args:
-            clustering_model: A fitted clustering model with a `labels_` attribute
-            manifold_result: Dict with keys "name" (str) and "coords" (2D array)
-            hide_noise: If True, exclude points labeled as noise (-1)
-            n_clusters_to_display: Number of top clusters to display (<= 20)
-        """
-        if n_clusters_to_display > 20:
-            raise ValueError("n_clusters_to_display needs to be <= to 20")
-
-        clusters = clustering_model.labels_
-        # manifold_name = manifold_result["name"]
-        manifold_coords = manifold_result["coords"]
-
-        # Handle noise
-        has_noise = -1 in clusters
-        if hide_noise and has_noise:
-            no_noise_mask = clusters != -1
-            coord_2d = manifold_coords[no_noise_mask]
-            clusters = clusters[no_noise_mask]
-        else:
-            coord_2d = manifold_coords
-
-        # Count the number of points in each cluster
-        unique_clusters, cluster_counts = np.unique(clusters, return_counts=True)
-        # Sort clusters by size (descending) and take top N
-        sorted_indices = np.argsort(-cluster_counts)[:n_clusters_to_display]
-        sorted_clusters = unique_clusters[sorted_indices]
-        sorted_counts = cluster_counts[sorted_indices]
-        n_clusters = len(sorted_clusters)
-
-        # Global min and max for x and y
-        global_x_min, global_x_max = coord_2d[:, 0].min(), coord_2d[:, 0].max()
-        global_y_min, global_y_max = coord_2d[:, 1].min(), coord_2d[:, 1].max()
-
-        # 6 max per row for clarity
-        n_cols = min(n_clusters, 6)
-        n_rows = int(np.ceil(n_clusters / n_cols))
-
-        # grid
-        fig, axes = plt.subplots(
-            nrows=n_rows, ncols=n_cols, figsize=(5 * n_cols, 5 * n_rows)
-        )
-        axes = axes.flatten()
-
-        for i, ax in enumerate(axes):
-            if i >= n_clusters:
-                ax.axis("off")  # Hide unused subplots
-                continue
-            cluster = sorted_clusters[i]
-            mask = clusters == cluster
-            ax.scatter(
-                coord_2d[mask, 0],
-                coord_2d[mask, 1],
-                color=sns.color_palette("tab20")[i],
-                s=20,
-                edgecolor="k",
-                linewidth=0.5,
-            )
-            ax.set_title(f"Cluster {cluster} (Size: {sorted_counts[i]})")
-            # Set same scale for all subplots
-            ax.set_xlim(global_x_min, global_x_max)
-            ax.set_ylim(global_y_min, global_y_max)
-
-        plt.tight_layout()
-        plt.show()
-
-    return plot_clusters, plot_clusters_grid
+    plt.tight_layout()
+    plt.show()
 
 
-@app.cell
-def _(cosine_similarity, np):
-    def compute_cosine_similarity(clusters_labels, tfidf_matrix):
-        for cluster_id in np.unique(clusters_labels):
-            # Get indices of points in this cluster
-            cluster_mask = clusters_labels == cluster_id
-            cluster_points = tfidf_matrix[cluster_mask]
+@app.function
+def compute_cosine_similarity(clusters_labels, tfidf_matrix):
+    for cluster_id in np.unique(clusters_labels):
+        # Get indices of points in this cluster
+        cluster_mask = clusters_labels == cluster_id
+        cluster_points = tfidf_matrix[cluster_mask]
 
-            # Compute pairwise cosine similarities within cluster
-            similarities = cosine_similarity(cluster_points)
+        # Compute pairwise cosine similarities within cluster
+        similarities = cosine_similarity(cluster_points)
 
-            # Get upper triangle (exclude diagonal and duplicates)
-            upper_triangle = similarities[np.triu_indices_from(similarities, k=1)]
+        # Get upper triangle (exclude diagonal and duplicates)
+        upper_triangle = similarities[np.triu_indices_from(similarities, k=1)]
 
-            print(f"Cluster {cluster_id}:")
-            print(f"  Size: {cluster_points.shape[0]}")
-            print(f"  Mean cosine similarity: {upper_triangle.mean():.3f}")
-            print(f"  Std cosine similarity: {upper_triangle.std():.3f}")
-            print()
-
-    return
+        print(f"Cluster {cluster_id}:")
+        print(f"  Size: {cluster_points.shape[0]}")
+        print(f"  Mean cosine similarity: {upper_triangle.mean():.3f}")
+        print(f"  Std cosine similarity: {upper_triangle.std():.3f}")
+        print()
 
 
 @app.cell(column=1, hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ## 2. Kmeans
     """)
@@ -627,7 +638,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ### Determine the number of clusters for K-means
 
@@ -642,7 +653,7 @@ def _(mo):
 
 
 @app.cell
-def _(MiniBatchKMeans, np, plt, silhouette_score):
+def _():
     def find_optimal_clusters_kmeans(
         tfidf_matrix, max_k: int, sample_size: int | None = None, random_state=42
     ) -> dict:
@@ -693,13 +704,16 @@ def _(MiniBatchKMeans, np, plt, silhouette_score):
             )
             print(f"Run {k} done")
 
-        best_k_silhouette = np.argmax(silhouette_values) + 2  # +2 because k starts at 2
+        best_k_silhouette = (
+            np.argmax(silhouette_values) + 2
+        )  # +2 because k starts at 2
         print("")
         return {
             "inertia_values": inertia_values,
             "silhouette_values": silhouette_values,
             "best_k_silhouette": best_k_silhouette,
         }
+
 
     # find best K for kmeans: plot elbow and silhouette methods
     def plot_silhouette_results(result: dict, max_k: int):
@@ -733,20 +747,21 @@ def _(MiniBatchKMeans, np, plt, silhouette_score):
 
         plt.tight_layout()
         plt.show()
-
     return find_optimal_clusters_kmeans, plot_silhouette_results
 
 
 @app.cell
 def _(find_optimal_clusters_kmeans, plot_silhouette_results, tfidf_matrix):
     max_k = 20
-    optimal_clusters_infos = find_optimal_clusters_kmeans(tfidf_matrix, max_k=max_k)
+    optimal_clusters_infos = find_optimal_clusters_kmeans(
+        tfidf_matrix, max_k=max_k
+    )
     plot_silhouette_results(optimal_clusters_infos, max_k=max_k)
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     - Silhouettes score are low (< 0.2) which indicates a poor clustering quality.
     - Scores from 6 to 10 varies a lot between 0.10 and 0.16, which menas that kmeans merges clusters or not with no clear trend.
@@ -758,33 +773,30 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ### Run kmeans
     """)
     return
 
 
-@app.cell
-def _(MiniBatchKMeans):
-    def run_kmeans(n_clusters: int, tfidf_matrix, n_init: int = 10):
-        kmeans = MiniBatchKMeans(
-            n_clusters=n_clusters, init="k-means++", n_init=10, random_state=42
-        )
-        kmeans.fit_predict(tfidf_matrix)
-        return kmeans
-
-    return (run_kmeans,)
+@app.function
+def run_kmeans(n_clusters: int, tfidf_matrix, n_init: int = 10):
+    kmeans = MiniBatchKMeans(
+        n_clusters=n_clusters, init="k-means++", n_init=10, random_state=42
+    )
+    kmeans.fit_predict(tfidf_matrix)
+    return kmeans
 
 
 @app.cell
-def _(run_kmeans, tfidf_matrix):
+def _(tfidf_matrix):
     kmeans_6 = run_kmeans(n_clusters=6, tfidf_matrix=tfidf_matrix)
     return (kmeans_6,)
 
 
 @app.cell
-def _(kmeans_6, plot_clusters, umap_2d):
+def _(kmeans_6, umap_2d):
     plot_clusters(
         kmeans_6, umap_2d, hide_noise=False
     )  # umap shows global distance between clusters
@@ -792,7 +804,7 @@ def _(kmeans_6, plot_clusters, umap_2d):
 
 
 @app.cell
-def _(kmeans_6, plot_clusters, plot_clusters_grid, tsne_2d):
+def _(kmeans_6, tsne_2d):
     # TSNE shows visual clusters but only local distance (for a given cluster) is relevant
     plot_clusters(kmeans_6, tsne_2d, hide_noise=True)
     # 3 major clusters, one very spread
@@ -803,7 +815,7 @@ def _(kmeans_6, plot_clusters, plot_clusters_grid, tsne_2d):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     Both representations are distorded representation of the reality.
     **TSNE:**
@@ -821,7 +833,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     **K=6**
 
@@ -836,27 +848,27 @@ def _(mo):
 
 
 @app.cell
-def _(run_kmeans, tfidf_matrix):
+def _(tfidf_matrix):
     kmeans_15 = run_kmeans(n_clusters=15, tfidf_matrix=tfidf_matrix)
     return (kmeans_15,)
 
 
 @app.cell
-def _(kmeans_15, plot_clusters, plot_clusters_grid, umap_2d):
+def _(kmeans_15, umap_2d):
     plot_clusters(kmeans_15, umap_2d, hide_noise=True)
     plot_clusters_grid(kmeans_15, umap_2d, hide_noise=False)
     return
 
 
 @app.cell
-def _(kmeans_15, plot_clusters, plot_clusters_grid, tsne_2d):
+def _(kmeans_15, tsne_2d):
     plot_clusters(kmeans_15, tsne_2d, hide_noise=True)
     plot_clusters_grid(kmeans_15, tsne_2d, hide_noise=False)
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     **K=15**
     With more clusters, the pattern persists:
@@ -883,7 +895,7 @@ def _(mo):
 
 
 @app.cell
-def _(df_conv, kmeans_15, np, pl, tsne_2d):
+def _(df_conv, kmeans_15, tsne_2d):
     # What are the few points in the middle of the TSNE representation ?
 
     # target_x, target_y = 25, 0
@@ -907,7 +919,9 @@ def _(df_conv, kmeans_15, np, pl, tsne_2d):
     print("\n" + "=" * 50)
     print("Text content:")
     print(
-        df_conv.select(pl.col("first_user_content_tokens")).to_series().to_list()[idx]
+        df_conv.select(pl.col("first_user_content_tokens"))
+        .to_series()
+        .to_list()[idx]
     )
     print("=" * 50)
 
@@ -922,7 +936,7 @@ def _(df_conv, kmeans_15, np, pl, tsne_2d):
 
 
 @app.cell(hide_code=True)
-def _(mo, same_cluster_nearby):
+def _(same_cluster_nearby):
     mo.md(rf"""
     The isolated point is not alone, we found {same_cluster_nearby - 1} points in the close area.
     Looking at the content of the text, we can see that it's a prompt to generate images with **Midjourney** a popular LLM for image generation.
@@ -933,7 +947,7 @@ def _(mo, same_cluster_nearby):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ### Clusters deep dive
     """)
@@ -941,13 +955,7 @@ def _(mo):
 
 
 @app.cell
-def _(
-    kmeans_15,
-    most_overrepresented_terms,
-    nbr_obs_clusters,
-    np,
-    top_tfidf_terms,
-):
+def _(kmeans_15):
     # Clusters exploration to see if we can spot differences between them or if we can't differentiate them as the clusters suggest
     # Cluster 0 contains the Midjourney prompts
 
@@ -967,7 +975,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     #### Number of Observations per Cluster:
     - **Two massive clusters dominate**: Cluster 10 (37.0%) and Cluster 5 (28.5%) together contain 65.5% of all conversations
@@ -1081,7 +1089,7 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ---
     """)
@@ -1089,7 +1097,7 @@ def _(mo):
 
 
 @app.cell(column=2, hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ## 3. HDBCSCAN
 
@@ -1107,44 +1115,42 @@ def _(mo):
     return
 
 
-@app.cell
-def _(TruncatedSVD, UMAP):
-    # SVD first to deal with the sparse nature of the TFIDF matix, then UMAP on the SVD
-    # UMAP on TFIDF is very expensive (UMAP's complexity is O(n×d)), SVD takes care of most of the sparse of the matrix
+@app.function
+# SVD first to deal with the sparse nature of the TFIDF matix, then UMAP on the SVD
+# UMAP on TFIDF is very expensive (UMAP's complexity is O(n×d)), SVD takes care of most of the sparse of the matrix
 
-    def umap_tfidf_matrix(
-        tfidf_matrix,
-        umap_n_components: int = 15,
-        umap_metric: str = "cosine",
-        umap_n_neighbors: int = 200,
-    ):
-        """
-        Reduce TFIDF matrix dimensions usuing UMAP
-        Preprocessing step before hdbscan
-        """
-        svd_big = TruncatedSVD(n_components=100, random_state=42)
-        X_reduced = svd_big.fit_transform(tfidf_matrix)
 
-        reducer = UMAP(
-            n_components=umap_n_components,
-            metric=umap_metric,
-            n_neighbors=umap_n_neighbors,
-        )
-        X_umap = reducer.fit_transform(X_reduced)
+def umap_tfidf_matrix(
+    tfidf_matrix,
+    umap_n_components: int = 15,
+    umap_metric: str = "cosine",
+    umap_n_neighbors: int = 200,
+):
+    """
+    Reduce TFIDF matrix dimensions usuing UMAP
+    Preprocessing step before hdbscan
+    """
+    svd_big = TruncatedSVD(n_components=100, random_state=42)
+    X_reduced = svd_big.fit_transform(tfidf_matrix)
 
-        return X_umap
+    reducer = UMAP(
+        n_components=umap_n_components,
+        metric=umap_metric,
+        n_neighbors=umap_n_neighbors,
+    )
+    X_umap = reducer.fit_transform(X_reduced)
 
-    return (umap_tfidf_matrix,)
+    return X_umap
 
 
 @app.cell
-def _(tfidf_matrix, umap_tfidf_matrix):
+def _(tfidf_matrix):
     X_umap = umap_tfidf_matrix(tfidf_matrix)
     return (X_umap,)
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     The minimum cluster size is the most important parameter to tune here.
     Keams produces a massive (or 2) cluster even with a higher cluster number.
@@ -1160,7 +1166,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ### Determine the best value of *min_cluster_size*
     """)
@@ -1168,7 +1174,7 @@ def _(mo):
 
 
 @app.cell
-def _(HDBSCAN, X_umap, np, plt):
+def _(X_umap):
     sizes = range(320, 360, 5)
     # sizes = range(340, 350, 1)  # run with this range to see the exact breakpoint
 
@@ -1196,7 +1202,7 @@ def _(HDBSCAN, X_umap, np, plt):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     We see a very clear breakpoint at exactly 347 (reminder: we work with a sample of the full data).
 
@@ -1212,7 +1218,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ### Run HDBSCAN
     """)
@@ -1220,7 +1226,7 @@ def _(mo):
 
 
 @app.cell
-def _(HDBSCAN, X_umap, np):
+def _(X_umap):
     hdb = HDBSCAN(min_cluster_size=340, n_jobs=-1)
     hdb.fit(X_umap)
     print(
@@ -1230,21 +1236,21 @@ def _(HDBSCAN, X_umap, np):
 
 
 @app.cell
-def _(hdb, plot_clusters, plot_clusters_grid, tsne_2d):
+def _(hdb, tsne_2d):
     plot_clusters(hdb, tsne_2d, hide_noise=True)  # try it with the noise
     plot_clusters_grid(hdb, tsne_2d, hide_noise=False, n_clusters_to_display=18)
     return
 
 
 @app.cell
-def _(hdb, plot_clusters, plot_clusters_grid, umap_2d):
+def _(hdb, umap_2d):
     plot_clusters(hdb, umap_2d, hide_noise=True)
     plot_clusters_grid(hdb, umap_2d, hide_noise=False, n_clusters_to_display=18)
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ### Clusters deep dive
     """)
@@ -1252,7 +1258,7 @@ def _(mo):
 
 
 @app.cell
-def _(hdb, most_overrepresented_terms, nbr_obs_clusters, np, top_tfidf_terms):
+def _(hdb):
     # Clusters exploration
     print(f"nbr of clusters: {len(np.unique(hdb.labels_)) - 1}")
     print("-" * 30)
@@ -1268,7 +1274,7 @@ def _(hdb, most_overrepresented_terms, nbr_obs_clusters, np, top_tfidf_terms):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     **HDBSCAN assigned ~43% (20,551 conversations) to noise**
 
@@ -1401,7 +1407,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     After clustering, we learned a lot about our data:
     - identification of real strong clusters
@@ -1421,10 +1427,102 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(r"""
     ---
     """)
+    return
+
+
+@app.cell(column=3, hide_code=True)
+def _():
+    mo.md(r"""
+    ### Full dataset - Kmeans
+    """)
+    return
+
+
+@app.cell
+def _(lf_conv):
+    df_full = lf_conv.collect(engine="streaming")
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    The full dataset is 475042 rows and it represent tp much data for HDBSCAN and for clusters metrics for kmeans.
+    Thanksfully, MinibatchsKmeans run on the full dataset in ~23 seconds.
+    The only way we have to determine the optimal number of clusters is to retreive the inertia value, computed by Kmeans.
+    """)
+    return
+
+
+@app.cell
+def _(tfidf_matrix):
+    inertias = []
+    K_range = range(10, 25, 1)  # Test 10, 15, 20, ..., 50
+
+    for k in K_range:
+        mbkmeans = MiniBatchKMeans(
+            n_clusters=k, random_state=42, batch_size=10000, max_iter=100
+        )
+        mbkmeans.fit(tfidf_matrix)
+        inertias.append(mbkmeans.inertia_)
+        print(f"k={k}, inertia={mbkmeans.inertia_:.2f}")
+
+    # Plot the elbow
+    plt.plot(K_range, inertias, "bo-")
+    plt.xlabel("k")
+    plt.ylabel("Inertia")
+    plt.title("Elbow Method")
+    plt.show()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Optimal cluster number is 20.
+    """)
+    return
+
+
+@app.cell
+def _(tfidf_matrix):
+    kmeans_full = run_kmeans(n_clusters=20, tfidf_matrix=tfidf_matrix)
+    return (kmeans_full,)
+
+
+@app.cell
+def _(kmeans_full):
+    print(
+        f"nbr of clusters: {len(np.unique(kmeans_full.labels_))}"
+    )  # -1 if hdbscan to exclude noise
+    print("-" * 30)
+
+    nbr_obs_clusters(kmeans_full)
+    print("-" * 30)
+
+    top_tfidf_terms(kmeans_full, 10)
+    print("-" * 30)
+
+    most_overrepresented_terms(kmeans_full, 10)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    The restults on the full dataset are consistent with the conclusions on the sample with Kmeans and HDBSCAN.
+    We have a huge cluster that represent the noise (cluster 19 = 47,7% of the dataset).
+    The other clusters can be regroup in the same categories/ topics than the clusters of the sample. Sometimes more clusters are found for a theme, this is normal since we have 5 more clusters.
+    """)
+    return
+
+
+@app.cell
+def _():
     return
 
 
