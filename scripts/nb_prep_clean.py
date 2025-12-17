@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.17.8"
+__generated_with = "0.18.4"
 app = marimo.App(width="columns")
 
 
@@ -12,7 +12,6 @@ def _():
     import marimo as mo
     import polars as pl
     from simplemma import lemmatize
-
     return duckdb, json, lemmatize, mo, pl
 
 
@@ -218,7 +217,7 @@ def _(lf, new_fields, pl, remove_nolang_messages, remove_non_english_mess):
 
 
 @app.cell
-def _(get_stopwords_pattern, lf_mess, pl, process_message_tokens):
+def _(lf_mess, pl):
     # From the flat message dataset, we aggregate to conversation level
     # (4 different aggregations = 4 new variables)
     lf_conv_init = lf_mess.group_by("conversation_id").agg(
@@ -252,15 +251,15 @@ def _(get_stopwords_pattern, lf_mess, pl, process_message_tokens):
             ).first(),
         ]
     )
-
+    """
     # We can now clean and tokenize the messages:
     stop_pattern = get_stopwords_pattern()  # from NLTK as a regex string
 
     # Clean aggregated messages of lf_conv_lvl_init
     lf_conv, vocab = process_message_tokens(
         lf_conv_init, "first_user_content", stop_pattern
-    )
-    return lf_conv, vocab
+    )"""
+    return (lf_conv_init,)
 
 
 @app.cell(hide_code=True)
@@ -303,6 +302,13 @@ def _(lf_conv):
     # ! memory intensive excecution, it's here that the data passes trough the RAM
     lf_conv.sink_parquet("data/clean/df_conv.parquet")
     print("✅ Saved lf_conv to: data/clean/df_conv.parquet")
+    return
+
+
+@app.cell
+def _(lf_conv_init):
+    # save lf_conv_init (data with no cleaning, only filtering out non english content)
+    lf_conv_init.sink_parquet("data/clean/df_conv_raw.parquet")
     return
 
 
@@ -397,7 +403,6 @@ def _(pl):
             )
 
         return lf_mess.remove(pl.col("language_message") == "Nolang")  # 2.
-
     return (remove_nolang_messages,)
 
 
@@ -409,7 +414,6 @@ def _(pl):
             (pl.col("language_message") == "English")
             | (pl.col("language_message") == "Latin")
         )
-
     return (remove_non_english_mess,)
 
 
@@ -443,8 +447,7 @@ def _(stopwords):
         stop_pattern = "|".join(f"\\b{word}\\b" for word in STOP_WORDS)
 
         return stop_pattern
-
-    return (get_stopwords_pattern,)
+    return
 
 
 @app.cell
@@ -598,8 +601,7 @@ def _(clean_and_tokenize, fast_lemmatize, get_lemma_dict_and_vocab, pl):
         lf_conv_lema = fast_lemmatize(lf_conv_clean, token_cols, lemma_dict)
 
         return lf_conv_lema, vocab
-
-    return (process_message_tokens,)
+    return
 
 
 if __name__ == "__main__":
