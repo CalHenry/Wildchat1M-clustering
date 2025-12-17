@@ -6,10 +6,12 @@ app = marimo.App(width="columns")
 with app.setup:
     import json
     import random
+    from pathlib import Path
 
     import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
+    from scipy import sparse
     import polars as pl
     import seaborn as sns
     from sklearn.cluster import HDBSCAN, MiniBatchKMeans
@@ -79,8 +81,8 @@ def _():
         pl.col("first_user_content", "first_user_content_tokens")
     )
 
-    # df_conv = sample(df=lf_conv, fraction=0.1, seed=42).collect(engine="streaming")
-    df_conv = lf_conv.collect(engine="streaming")
+    df_conv = sample(df=lf_conv, fraction=0.1, seed=42).collect(engine="streaming")
+    # df_conv = lf_conv.collect(engine="streaming")
 
     df_size = df_conv.height
     return df_conv, lf_conv, vocab
@@ -106,10 +108,25 @@ def _(df_conv, vocab):
         max_features=None,
     )
 
-    tfidf_matrix = vectorizer.fit_transform(
-        df_conv.select(pl.col("first_user_content_tokens")).to_series().to_list()
-    )
-    return tfidf_matrix, vectorizer
+    # matrix_path = Path("data/processed/tfidf_matrix.npz")
+    matrix_path = Path("data/processed/tfidf_matrix_sample.npz")
+    if matrix_path.exists():
+        print(f"Load TF-IDF matrix from {matrix_path}")
+        tfidf_matrix = sparse.load_npz(matrix_path)
+    else:
+        print("Compute TF-IDF matrix")
+        tfidf_matrix = vectorizer.fit_transform(
+            df_conv.select(pl.col("first_user_content_tokens"))
+            .to_series()
+            .to_list()
+        )
+    return matrix_path, tfidf_matrix, vectorizer
+
+
+@app.cell
+def _(matrix_path, tfidf_matrix):
+    sparse.save_npz(matrix_path, tfidf_matrix)
+    return
 
 
 @app.cell
@@ -201,20 +218,27 @@ def sample(
 
 
 @app.function
-def get_tsne_2D_coords(tfidf_matrix, perplexity: int = 30) -> dict:
+def get_tsne_2D_coords(
+    embeddings, perplexity: int = 30, use_svd: bool = True
+) -> dict:
     """
     run TSNE with 2 components after a TruncatedSVD to reduce computation time
     (input is a tfidf matrix which is sparse)
 
     ! TSNE can be long and expensive compute
+    args:
+        embeddings: either TF-IDF sparse matrix or sentence transformer embeddings (dense numpy array)
     """
-
-    svd = TruncatedSVD(n_components=50, random_state=42)
-    tfidf_reduced = svd.fit_transform(tfidf_matrix)
+    if use_svd:
+        svd = TruncatedSVD(n_components=50, random_state=42)
+        embeddings_reduced = svd.fit_transform(embeddings)
+    else:
+        embeddings_reduced = embeddings
 
     # tsne
     tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
-    tsne_coords = tsne.fit_transform(tfidf_reduced)
+    tsne_coords = tsne.fit_transform(embeddings_reduced)
+
     tsne_result = {
         "name": tsne.__class__.__name__,
         "coords": tsne_coords,
@@ -652,106 +676,105 @@ def _():
     return
 
 
-@app.cell
-def _():
-    def find_optimal_clusters_kmeans(
-        tfidf_matrix, max_k: int, sample_size: int | None = None, random_state=42
-    ) -> dict:
-        """
-        Find the optimal number of clusters using Elbow method and Silhouette score.
+@app.function
+def find_optimal_clusters_kmeans(
+    tfidf_matrix, max_k: int, sample_size: int | None = None, random_state=42
+) -> dict:
+    """
+    Find the optimal number of clusters using Elbow method and Silhouette score.
 
-        args:
-            max_k (int): Maximum number of clusters to evaluate
-            sample_size (int): Number of samples to use for Silhouette score. if None use the whole sample
-        """
-        # Elbow method
-        inertia_values = []
-        for k in range(1, max_k):
-            kmeans = MiniBatchKMeans(
-                n_clusters=k,
-                init="k-means++",
-                n_init=10,
+    args:
+        max_k (int): Maximum number of clusters to evaluate
+        sample_size (int): Number of samples to use for Silhouette score. if None use the whole sample
+    """
+    # Elbow method
+    inertia_values = []
+    for k in range(1, max_k):
+        kmeans = MiniBatchKMeans(
+            n_clusters=k,
+            init="k-means++",
+            n_init=10,
+            random_state=random_state,
+        )
+        kmeans.fit(tfidf_matrix)
+        inertia_values.append(kmeans.inertia_)
+
+    # Silhouette score
+    if sample_size is None:
+        sample_size = tfidf_matrix.shape[0]
+    sample_size = min(sample_size, tfidf_matrix.shape[0])
+
+    silhouette_values = []
+    for k in range(2, max_k):
+        kmeans = MiniBatchKMeans(
+            n_clusters=k,
+            init="k-means++",
+            n_init=10,
+            random_state=random_state,
+        )
+        labels = kmeans.fit_predict(tfidf_matrix)
+        indices = np.random.choice(
+            tfidf_matrix.shape[0],
+            min(sample_size, tfidf_matrix.shape[0]),
+            replace=False,
+        )
+        silhouette_values.append(
+            silhouette_score(
+                tfidf_matrix[indices],
+                labels[indices],
                 random_state=random_state,
             )
-            kmeans.fit(tfidf_matrix)
-            inertia_values.append(kmeans.inertia_)
+        )
+        print(f"Run {k} done")
 
-        # Silhouette score
-        if sample_size is None:
-            sample_size = tfidf_matrix.shape[0]
-        sample_size = min(sample_size, tfidf_matrix.shape[0])
-
-        silhouette_values = []
-        for k in range(2, max_k):
-            kmeans = MiniBatchKMeans(
-                n_clusters=k,
-                init="k-means++",
-                n_init=10,
-                random_state=random_state,
-            )
-            labels = kmeans.fit_predict(tfidf_matrix)
-            indices = np.random.choice(
-                tfidf_matrix.shape[0],
-                min(sample_size, tfidf_matrix.shape[0]),
-                replace=False,
-            )
-            silhouette_values.append(
-                silhouette_score(
-                    tfidf_matrix[indices],
-                    labels[indices],
-                    random_state=random_state,
-                )
-            )
-            print(f"Run {k} done")
-
-        best_k_silhouette = (
-            np.argmax(silhouette_values) + 2
-        )  # +2 because k starts at 2
-        print("")
-        return {
-            "inertia_values": inertia_values,
-            "silhouette_values": silhouette_values,
-            "best_k_silhouette": best_k_silhouette,
-        }
+    best_k_silhouette = (
+        np.argmax(silhouette_values) + 2
+    )  # +2 because k starts at 2
+    print("")
+    return {
+        "inertia_values": inertia_values,
+        "silhouette_values": silhouette_values,
+        "best_k_silhouette": best_k_silhouette,
+    }
 
 
-    # find best K for kmeans: plot elbow and silhouette methods
-    def plot_silhouette_results(result: dict, max_k: int):
-        """
-        Plot the Elbow Method and Silhouette Score results.
-        please to run find_optimal_clusters() first to get the dict input
+@app.function
+# find best K for kmeans: plot elbow and silhouette methods
+def plot_silhouette_results(result: dict, max_k: int):
+    """
+    Plot the Elbow Method and Silhouette Score results.
+    please to run find_optimal_clusters() first to get the dict input
 
-        args:
-            result: returned by `find_optimal_clusters()`
-            max_k: number of clusters evaluated, has to be the same as the max_k of 'find_optimal_clusters_kmeans()'
-        """
-        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+    args:
+        result: returned by `find_optimal_clusters()`
+        max_k: number of clusters evaluated, has to be the same as the max_k of 'find_optimal_clusters_kmeans()'
+    """
+    fig, ax = plt.subplots(1, 2, figsize=(12, 5))
 
-        # --- First subplot: Elbow Method ---
-        k_range = range(1, max_k)
-        ax[0].plot(k_range, result["inertia_values"], "bo-")
-        ax[0].set_xlabel("Number of clusters (K)")
-        ax[0].set_ylabel("Inertia")
-        ax[0].set_title("Elbow Method")
-        ax[0].set_xticks(k_range)
-        ax[0].grid(True)
+    # --- First subplot: Elbow Method ---
+    k_range = range(1, max_k)
+    ax[0].plot(k_range, result["inertia_values"], "bo-")
+    ax[0].set_xlabel("Number of clusters (K)")
+    ax[0].set_ylabel("Inertia")
+    ax[0].set_title("Elbow Method")
+    ax[0].set_xticks(k_range)
+    ax[0].grid(True)
 
-        # --- Second subplot: Silhouette Score ---
-        silhouette_k_range = range(2, max_k)
-        ax[1].plot(silhouette_k_range, result["silhouette_values"], "ro-")
-        ax[1].set_xlabel("Number of clusters (K)")
-        ax[1].set_ylabel("Mean Silhouette Score")
-        ax[1].set_title("Silhouette Score")
-        ax[1].set_xticks(silhouette_k_range)
-        ax[1].grid(True)
+    # --- Second subplot: Silhouette Score ---
+    silhouette_k_range = range(2, max_k)
+    ax[1].plot(silhouette_k_range, result["silhouette_values"], "ro-")
+    ax[1].set_xlabel("Number of clusters (K)")
+    ax[1].set_ylabel("Mean Silhouette Score")
+    ax[1].set_title("Silhouette Score")
+    ax[1].set_xticks(silhouette_k_range)
+    ax[1].grid(True)
 
-        plt.tight_layout()
-        plt.show()
-    return find_optimal_clusters_kmeans, plot_silhouette_results
+    plt.tight_layout()
+    plt.show()
 
 
 @app.cell
-def _(find_optimal_clusters_kmeans, plot_silhouette_results, tfidf_matrix):
+def _(tfidf_matrix):
     max_k = 20
     optimal_clusters_infos = find_optimal_clusters_kmeans(
         tfidf_matrix, max_k=max_k
@@ -781,17 +804,21 @@ def _():
 
 
 @app.function
-def run_kmeans(n_clusters: int, tfidf_matrix, n_init: int = 10):
+def run_kmeans(n_clusters: int, embeddings, n_init: int = 10):
+    """
+    args:
+        embeddings: either TF-IDF sparse matrix or sentence transformer embeddings (dense numpy array)
+    """
     kmeans = MiniBatchKMeans(
         n_clusters=n_clusters, init="k-means++", n_init=10, random_state=42
     )
-    kmeans.fit_predict(tfidf_matrix)
+    kmeans.fit_predict(embeddings)
     return kmeans
 
 
 @app.cell
 def _(tfidf_matrix):
-    kmeans_6 = run_kmeans(n_clusters=6, tfidf_matrix=tfidf_matrix)
+    kmeans_6 = run_kmeans(n_clusters=6, embeddings=tfidf_matrix)
     return (kmeans_6,)
 
 
@@ -849,7 +876,7 @@ def _():
 
 @app.cell
 def _(tfidf_matrix):
-    kmeans_15 = run_kmeans(n_clusters=15, tfidf_matrix=tfidf_matrix)
+    kmeans_15 = run_kmeans(n_clusters=15, embeddings=tfidf_matrix)
     return (kmeans_15,)
 
 
@@ -1093,6 +1120,18 @@ def _():
     mo.md(r"""
     ---
     """)
+    return
+
+
+@app.cell
+def _(df_conv, kmeans_6, tfidf_matrix, vectorizer):
+    nbr_obs_clusters(kmeans_6, size_df=df_conv.height)
+    print("-" * 30)
+
+    top_tfidf_terms(kmeans_6, tfidf_matrix, vectorizer, 3)
+    print("-" * 30)
+
+    most_overrepresented_terms(kmeans_6, tfidf_matrix, vectorizer, 3)
     return
 
 
@@ -1461,7 +1500,7 @@ def _():
 @app.cell
 def _(tfidf_matrix):
     inertias = []
-    K_range = range(10, 25, 1)  # Test 10, 15, 20, ..., 50
+    K_range = range(10, 25, 1)
 
     for k in K_range:
         mbkmeans = MiniBatchKMeans(
@@ -1483,14 +1522,14 @@ def _(tfidf_matrix):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    Optimal cluster number is 20.
+    Optimal number of clusters is 20.
     """)
     return
 
 
 @app.cell
 def _(tfidf_matrix):
-    kmeans_full = run_kmeans(n_clusters=20, tfidf_matrix=tfidf_matrix)
+    kmeans_full = run_kmeans(n_clusters=20, embeddings=tfidf_matrix)
     return (kmeans_full,)
 
 
