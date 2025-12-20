@@ -29,7 +29,6 @@ with app.setup:
     import matplotlib.pyplot as plt
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    # to avoid deadlocks when encoding
 
 
 @app.cell(hide_code=True)
@@ -58,19 +57,13 @@ def _():
     )
     # df_conv_raw contains our data with no cleanings, only filtering the english content.
 
-    df_conv = sample(df=lf_conv, fraction=0.1, seed=42).collect(engine="streaming")
-    # df_conv = lf_conv.collect(engine="streaming"
+    # df_conv = sample(df=lf_conv, fraction=0.1, seed=42).collect(engine="streaming")
+    df_conv = lf_conv.collect(engine="streaming")
     return (df_conv,)
 
 
 @app.cell
-def _(df_conv):
-    df_conv.select(pl.col("first_user_content")).to_series().drop_nulls().to_list()
-    return
-
-
-@app.cell
-def _(df_conv):
+def _():
     # get vocab
     with open("data/processed/vocab.json", "r", encoding="utf-8") as f:
         vocab = json.load(f)
@@ -80,20 +73,21 @@ def _(df_conv):
         lowercase=True,
     )
 
-
+    """
     tfidf_matrix = vectorizer.fit_transform(
         df_conv.select(pl.col("first_user_content"))
         .to_series()
         .drop_nulls()
         .to_list()
     )
-    return tfidf_matrix, vectorizer
+    """
+    return (vectorizer,)
 
 
 @app.cell
 def _():
-    # tfidf_matrix = sparse.load_npz("data/processed/tfidf_matrix.npz")
-    return
+    tfidf_matrix = sparse.load_npz("data/processed/tfidf_matrix.npz")
+    return (tfidf_matrix,)
 
 
 @app.cell(hide_code=True)
@@ -120,12 +114,6 @@ def _(df_conv, model):
 def _(embeddings):
     tsne_2d = get_tsne_2D_coords(embeddings, use_svd=False)
     return (tsne_2d,)
-
-
-@app.cell
-def _(df_conv):
-    df_conv.schema
-    return
 
 
 @app.cell(column=1, hide_code=True)
@@ -241,8 +229,7 @@ def _():
 
     This result is at the same time similar and very different from the HDBSCAN clusters with TF-IDF. Let's do a compartive analysis of the cluster size, the top tfidf terms and most overrepresented terms for both HDBSCAN runs (TF-IDF vs Transformer embeddings).
 
-    ## How does the clusters compare the the HDBSCAN's clusters with TF-IDF as the input ?
-
+    ## Comparison HDBSCAN clusters: TFI-IDF inputs vs Transformers embeddings inputs
     - 2.3x the number of clusters (28 to 65)
     - More noise (43% to 58%)
     - Lowered the value of *min_cluster_size* (340 to 65)
@@ -252,7 +239,7 @@ def _():
 
     <summary>AI to the rescue</summary>
 
-    To compare clusters from both approaches, we have to compare side by side the outputs of the exploration functions that deliver the real insights about the clusters. For the model above, the output of the cell is more than 1600 lines long. <br>
+    To compare clusters from both approaches, we have to compare side by side the outputs of the exploration functions that deliver the real insights about the clusters. For the model above, the output of the cell is more than 14000 lines long. <br>
     To make this task easier, i gave both outputs to [Claude](https://claude.ai) and asked him to report the major differences between the 2 clusters sets (the other output is delivered by the *clustering.py* notebook).   <br>
     Most of the content below comes or from Claude's response.
 
@@ -349,6 +336,37 @@ def _():
     **In conclusion**, Transformers is capable or revealing semantic structure that TF-IDF can't see.
     Both approach are valid, **TF-IDF** is better to categorize (less clusters, less specific) and **Transformers** is better to discovery (detailled, catches nuances)
     """)
+    return
+
+
+@app.cell(column=2)
+def _(hdb):
+    print(f"nbr of clusters: {len(np.unique(hdb.labels_)) - 1}")
+    print("-" * 30)
+    return
+
+
+@app.cell
+def _(df_conv, hdb):
+    nbr_obs_clusters(hdb, size_df=df_conv.height)
+    print("-" * 30)
+    return
+
+
+@app.cell
+def _(hdb, tfidf_matrix, vectorizer):
+    top_tfidf_terms(
+        hdb, tfidf_matrix, vectorizer, nbr_terms=10, clusters=list(range(400, 672))
+    )
+    print("-" * 30)
+    return
+
+
+@app.cell
+def _(hdb, tfidf_matrix, vectorizer):
+    most_overrepresented_terms(
+        hdb, tfidf_matrix, vectorizer, 10, clusters=list(range(400, 672))
+    )
     return
 
 

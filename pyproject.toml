@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "altair>=6.0.0",
     "duckdb>=1.4.0",
+    "ipython>=9.8.0",
     "marimo>=0.17.7",
     "matplotlib>=3.10.6",
     "nltk>=3.9.2",
@@ -18,8 +19,10 @@ dependencies = [
     "ruff>=0.14.4",
     "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",
+    "sentence-transformers>=5.2.0",
     "simplemma>=1.1.2",
     "spacy>=3.8.9",
     "sqlglot>=27.29.0",
+    "umap-learn>=0.5.9.post2",
     "wordcloud>=1.9.4",
 ]

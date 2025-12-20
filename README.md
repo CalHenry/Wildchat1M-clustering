@@ -8,7 +8,7 @@ This project uses the **WildChat** dataset by Zhao et al. (2024), containing 1M 
 - **Dataset**: [Hugging Face Link](https://huggingface.co/papers/2405.01470)
 - **License**: - see [data/LICENSE](data/LICENSE.md)
 
-## Part1: Data cleaning and preparation for clustering
+## Part 1: Data cleaning and preparation for clustering
 
 Our dataset consists of 14 parquet files containing ~1 million conversation records. The raw data uses a nested schema optimized for storage, with each conversation containing multiple messages and their metadata.  
 Data Processing Pipeline:
@@ -19,7 +19,7 @@ Data Processing Pipeline:
 
 The preprocessing reduces the dataset to ~475,000 rows suitable for analysis.
 
-## Part 2: Clustering analysis
+## Part 2: Clustering on TF-IDF matrix
 
 We apply unsupervised clustering to reveal hidden patterns in ChatGPT conversations and understand better our dataset. Moving beyond individual data points to understand global structure and cluster-specific characteristics.  
 
@@ -43,6 +43,21 @@ Clustering Algorithms:
 
 Both algorithms are 2 different lenses and will produce different results: K-means provides complete partitioning of the entire dataset, while HDBSCAN reveals density-based groupings and identifies noise (conversations that don't fit in the clusters).   
 Comparing the result will highlight which patterns are robust and which are algorithm-dependant.  
+
+## Part 3: Clustering on Transformers embeddings
+
+What are Transformers models ?  
+Transformers are neural network models that process text by learning contextual relationships between words. The model processes entire sequences simultaneously, allowing each word to draw meaning from all other words in the context. Therefore we can encode a part of the semantic meaning of a document in a vector.  
+We will specifically use a sentence Transformers model.   
+[**all-MiniLM-L6-v2**](https://huggingface.co/nreimers/MiniLM-L6-H384-uncased) has 22.3 milions parameters and weights ~91mb, making it a lightweight model. Itcconverts a document into a 384 dimensional dense vector space called *embedding*. This differs from the sparse nature of a TF-IDF matrix.  
+The model has been trained on more than 1 bilion sentences so it has seen many words in many contexts. We will use the pre trained version.  
+
+**Transformers are fundamentally different from classic NLP (TF-IDF):**  
+TF-IDF treats words as independent tokens and do not consider any context. It counts their statistical occurrence, creating sparse vectors where "king" and "monarch" are completely unrelated unless they co-occur in documents.  
+Transformers on the other hand is all about context and understand semantic meaning through it, creating dense vectors where "king" and "monarch" are geometrically close because the model learned from vast text that they're used in similar contexts.  
+For this reason, Transformers models do not require any cleaning or data processing since they are trained on real (thus messy) data. The cleaned data we provided to TF-IDF could infact hurt the model by remvoving context elements.  
+Transformers since they are neural network are black boxes and it's impossible to rigorously explain why the model attributed this vector to this word. This differs from TF-IDF's simple formula that express directly why we get a given value for a given words. This allow to link the numeric value to the actual  data.  
+&
 
 
 ## Working with data bigger than the memory  
